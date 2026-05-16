@@ -42,7 +42,7 @@ def keep_alive():
 threading.Thread(target=keep_alive, daemon=True).start()
 
 # =================== KONFIGURASI ===================
-TOKEN = "8871249167:AAHFpAPMUq0JFBtaJgapJTjYL7sGF9x-sGg"
+TOKEN = "8871249167:AAG5-RAoIwJmK61EiLZUps1vvaqH0ewk7Hs"
 ADMIN_ID = 7836786174
 QRIS_PHOTO_PATH = "qris.png"
 
@@ -222,15 +222,18 @@ async def hapus_admin_msg(context, user_id):
 
 def teks_menu_utama():
     return (
-        "🏪 *HYPER FAMILY BUY*\n"
+        "🏪 *HYPER FAMILY STORE*\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Selamat datang! Pilih paket yang tersedia:\n\n"
+        "Selamat datang! Kami menyediakan konten premium\n"
+        "dengan harga terjangkau dan proses cepat.\n\n"
+        "📦 *Paket Tersedia:*\n\n"
         "🔥 *Gb Biasa*\n"
-        "┗ 160+ Video Premium • *Rp 5.000*\n\n"
+        "   ┗ 160+ Video Premium  •  *Rp 5.000*\n\n"
         "👑 *Gb Vip*\n"
-        "┗ 6.800+ Video Premium • *Rp 25.000*\n\n"
+        "   ┗ 6.800+ Video Premium  •  *Rp 25.000*\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "💳 QRIS semua e-wallet  •  ⚡ Proses 1–5 menit"
+        "💳 Pembayaran via QRIS semua e-wallet\n"
+        "⚡ Proses pengiriman 1–5 menit setelah konfirmasi"
     )
 
 
@@ -264,7 +267,7 @@ async def post_init(application: Application):
     await application.bot.set_my_commands(
         [
             BotCommand("start", "Buka toko"),
-            BotCommand("pending", "Order yang menunggu konfirmasi"),
+            BotCommand("pending", "Pesanan menunggu konfirmasi"),
             BotCommand("stats", "Statistik penjualan"),
             BotCommand("riwayat", "Riwayat transaksi selesai"),
             BotCommand("broadcast", "Kirim pesan ke semua buyer"),
@@ -284,6 +287,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     simpan_user(user.id, user.full_name)
 
+    # FIX: Hapus state broadcast jika ada saat user ketik /start
+    context.bot_data.pop("waiting_broadcast", None)
+
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text=teks_menu_utama(),
@@ -298,8 +304,10 @@ async def cek_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not order:
         await update.message.reply_text(
-            "📭 Kamu belum pernah melakukan pemesanan.\n\n"
-            "Ketik /start untuk mulai berbelanja."
+            "📭 *Belum Ada Pesanan*\n\n"
+            "Kamu belum pernah melakukan pemesanan.\n"
+            "Ketik /start untuk mulai berbelanja.",
+            parse_mode="Markdown",
         )
         return
 
@@ -307,21 +315,21 @@ async def cek_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_map = {
         "waiting": ("⏳", "Menunggu bukti pembayaran"),
         "pending": ("🔍", "Sedang diverifikasi admin"),
-        "completed": ("✅", "Pesanan selesai"),
+        "completed": ("✅", "Pesanan selesai & terkirim"),
         "rejected": ("❌", "Pembayaran ditolak"),
-        "expired": ("⌛", "Sesi berakhir"),
+        "expired": ("⌛", "Sesi pembayaran berakhir"),
     }
     emoji_s, label_s = status_map.get(order[5], ("❓", order[5]))
 
     await update.message.reply_text(
         f"📦 *Status Pesanan Terakhir*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"• Paket  : {paket['emoji']} {paket['nama']}\n"
-        f"• Harga  : {format_harga(paket['harga'])}\n"
-        f"• Status : {emoji_s} {label_s}\n"
-        f"• Waktu  : {order[6]}\n\n"
+        f"• Paket   : {paket['emoji']} {paket['nama']}\n"
+        f"• Harga   : {format_harga(paket['harga'])}\n"
+        f"• Status  : {emoji_s} {label_s}\n"
+        f"• Waktu   : {order[6]}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"_Butuh bantuan? Hubungi admin._",
+        f"_Butuh bantuan? Silakan hubungi admin._",
         parse_mode="Markdown",
     )
 
@@ -350,11 +358,12 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📦 *Pilih Paket*\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "🔥 *Gb Biasa*\n"
-        "┗ 160+ Video Premium\n"
-        "┗ Harga: *Rp 5.000*\n\n"
+        "   ┗ 160+ Video Premium\n"
+        "   ┗ Harga: *Rp 5.000*\n\n"
         "👑 *Gb Vip*\n"
-        "┗ 6.800+ Video Premium\n"
-        "┗ Harga: *Rp 25.000*"
+        "   ┗ 6.800+ Video Premium\n"
+        "   ┗ Harga: *Rp 25.000*\n\n"
+        "_Pilih paket yang sesuai kebutuhanmu:_"
     )
 
     keyboard = [
@@ -406,16 +415,17 @@ async def pilih_paket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = (
         f"{paket['emoji']} *{paket['nama']}*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"• Konten : {paket['deskripsi']}\n"
-        f"• Total  : *{format_harga(paket['harga'])}*\n"
-        f"• Berlaku: Hingga pukul *{expire}*\n\n"
+        f"• Konten  : {paket['deskripsi']}\n"
+        f"• Total   : *{format_harga(paket['harga'])}*\n"
+        f"• Berlaku : Hingga pukul *{expire}*\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"*Cara Pembayaran:*\n"
-        f"1️⃣ Scan QRIS di atas\n"
-        f"2️⃣ Transfer *tepat* {format_harga(paket['harga'])}\n"
-        f"3️⃣ Screenshot bukti transfer\n"
+        f"*Langkah Pembayaran:*\n\n"
+        f"1️⃣ Scan QRIS di atas menggunakan aplikasi e-wallet\n"
+        f"2️⃣ Masukkan nominal *tepat* {format_harga(paket['harga'])}\n"
+        f"3️⃣ Selesaikan pembayaran & ambil screenshot\n"
         f"4️⃣ Kirim screenshot ke chat ini\n\n"
-        f"⚠️ _Nominal harus sesuai & screenshot harus jelas._"
+        f"⚠️ _Pastikan nominal sesuai dan screenshot terlihat jelas._\n"
+        f"⏰ _Pesanan otomatis dibatalkan jika melebihi batas waktu._"
     )
 
     keyboard = [
@@ -443,17 +453,7 @@ async def pilih_paket(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=(
-            "📸 *Kirim Screenshot Bukti Pembayaran*\n\n"
-            "Pastikan screenshot menampilkan:\n"
-            "• Nominal yang sesuai\n"
-            "• Tanggal & waktu transaksi\n"
-            "• Status berhasil"
-        ),
-        parse_mode="Markdown",
-    )
+    # FIX: Hapus send_message duplikat — instruksi sudah ada di caption foto di atas
 
     context.job_queue.run_once(
         auto_cancel,
@@ -479,8 +479,9 @@ async def auto_cancel(context: ContextTypes.DEFAULT_TYPE):
             chat_id=user_id,
             text=(
                 "⌛ *Sesi Pembayaran Berakhir*\n\n"
-                "Pesanan kamu telah dibatalkan secara otomatis karena melebihi batas waktu 30 menit.\n\n"
-                "Ketik /start untuk memulai pesanan baru."
+                "Pesanan kamu dibatalkan secara otomatis karena\n"
+                "melebihi batas waktu 30 menit.\n\n"
+                "Ketik /start untuk membuat pesanan baru."
             ),
             parse_mode="Markdown",
         )
@@ -493,7 +494,7 @@ async def cek_pending_lama(context: ContextTypes.DEFAULT_TYPE):
     if orders:
         text = f"🔔 *Pengingat: {len(orders)} Pesanan Belum Diproses*\n\n"
         for o in orders:
-            paket = PAKET[o[3]]
+            paket = PAKET.get(o[3], {"emoji": "❓", "nama": "Unknown"})
             text += f"• {o[2]} — {paket['emoji']} {paket['nama']} ({o[6]})\n"
         text += "\n_Segera proses pesanan di atas._"
 
@@ -524,8 +525,11 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if order and order[5] == "pending":
         await update.message.reply_text(
-            "⏳ Bukti pembayaran kamu sedang dalam proses verifikasi.\n"
-            "Mohon tunggu, admin akan segera mengkonfirmasi."
+            "🔍 *Pembayaran Sedang Diverifikasi*\n\n"
+            "Bukti pembayaran kamu sudah kami terima dan\n"
+            "sedang dalam proses verifikasi oleh admin.\n\n"
+            "_Mohon tunggu, proses biasanya memakan waktu 1–5 menit._",
+            parse_mode="Markdown",
         )
         return
 
@@ -543,7 +547,10 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
             paket_id = row[0]
         else:
             await update.message.reply_text(
-                "⚠️ Kamu belum memilih paket.\nKetik /start untuk memulai pemesanan."
+                "⚠️ *Tidak Ada Pesanan Aktif*\n\n"
+                "Kamu belum memilih paket atau sesi telah berakhir.\n"
+                "Ketik /start untuk memulai pemesanan baru.",
+                parse_mode="Markdown",
             )
             return
 
@@ -565,14 +572,15 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=user_id,
         text=(
-            f"🧾 *Bukti Pembayaran Diterima*\n"
+            f"✅ *Bukti Pembayaran Diterima*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"• Paket  : {paket['emoji']} {paket['nama']}\n"
             f"• Total  : {format_harga(paket['harga'])}\n"
             f"• Waktu  : {datetime.now().strftime('%H:%M, %d %b %Y')}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏳ Sedang diverifikasi oleh admin.\n"
-            f"Estimasi konfirmasi: *1–5 menit*."
+            f"⏳ Pembayaran sedang diverifikasi oleh admin.\n"
+            f"Estimasi konfirmasi: *1–5 menit*.\n\n"
+            f"_Harap tetap di chat ini dan jangan menutup aplikasi._"
         ),
         parse_mode="Markdown",
     )
@@ -580,19 +588,19 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     notif_msg = await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=(
-            f"🔔 *Pesanan Baru Masuk*\n"
+            f"🔔 *Pesanan Baru Masuk!*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"• Pembeli : {user.full_name}\n"
-            f"• Paket   : {paket['emoji']} {paket['nama']}\n"
-            f"• Total   : {format_harga(paket['harga'])}\n"
-            f"• Waktu   : {datetime.now().strftime('%H:%M, %d %b %Y')}"
+            f"👤 Pembeli : {user.full_name}\n"
+            f"📦 Paket   : {paket['emoji']} {paket['nama']}\n"
+            f"💰 Total   : {format_harga(paket['harga'])}\n"
+            f"🕐 Waktu   : {datetime.now().strftime('%H:%M, %d %b %Y')}"
         ),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton(
-                        "📋 Lihat Pesanan", callback_data="admin_see_orders"
+                        "📋 Proses Pesanan", callback_data="admin_see_orders"
                     )
                 ]
             ]
@@ -611,15 +619,15 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📊 *Statistik Penjualan*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👥 Total buyer terdaftar: *{s['total_user']} orang*\n\n"
+        f"👥 Total buyer terdaftar : *{s['total_user']} orang*\n\n"
         f"📅 *Hari Ini:*\n"
         f"• Transaksi selesai : {s['hari_order']}\n"
         f"• Pendapatan        : *{format_harga(s['hari_pendapatan'])}*\n\n"
-        f"📈 *Keseluruhan:*\n"
+        f"📈 *Total Keseluruhan:*\n"
         f"• Transaksi selesai : {s['total_order']}\n"
         f"• Total pendapatan  : *{format_harga(s['total_pendapatan'])}*\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"⏳ Menunggu konfirmasi: *{s['pending_count']} pesanan*",
+        f"⏳ Menunggu konfirmasi : *{s['pending_count']} pesanan*",
         parse_mode="Markdown",
     )
 
@@ -633,7 +641,7 @@ async def admin_riwayat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = f"📜 *Riwayat Transaksi (20 Terakhir)*\n━━━━━━━━━━━━━━━━━━━━\n\n"
     for i, o in enumerate(orders, 1):
-        paket = PAKET[o[3]]
+        paket = PAKET.get(o[3], {"emoji": "❓", "nama": "Unknown", "harga": 0})
         text += f"{i}. *{o[2]}* — {paket['emoji']} {paket['nama']} — {format_harga(paket['harga'])}\n   _{o[6]}_\n\n"
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -642,13 +650,24 @@ async def admin_broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE
     if update.message.from_user.id != ADMIN_ID:
         return
     users = get_all_users()
+    # FIX: Set flag broadcast dengan benar
     context.bot_data["waiting_broadcast"] = True
     await update.message.reply_text(
         f"📢 *Mode Broadcast*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"Total penerima: *{len(users)} buyer*\n\n"
-        f"Ketik pesan yang ingin dikirim sekarang.\n"
+        f"Ketik pesan yang ingin dikirim sekarang.\n\n"
         f"_Kirim /batal untuk membatalkan._",
+        parse_mode="Markdown",
+    )
+
+
+async def admin_batal_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+    context.bot_data.pop("waiting_broadcast", None)
+    await update.message.reply_text(
+        "❌ *Broadcast dibatalkan.*",
         parse_mode="Markdown",
     )
 
@@ -659,14 +678,14 @@ async def admin_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     orders = get_all_pending()
     if not orders:
         await update.message.reply_text(
-            "✅ Tidak ada pesanan yang menunggu konfirmasi."
+            "✅ Tidak ada pesanan yang menunggu konfirmasi saat ini."
         )
         return
 
     text = f"📋 *Pesanan Menunggu Konfirmasi ({len(orders)})*\n━━━━━━━━━━━━━━━━━━━━\n\n"
     keyboard = []
     for o in orders:
-        paket = PAKET[o[3]]
+        paket = PAKET.get(o[3], {"emoji": "❓", "nama": "Unknown"})
         text += f"• {o[2]} — {paket['emoji']} {paket['nama']} — {o[6]}\n"
         keyboard.append(
             [
@@ -681,17 +700,20 @@ async def admin_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def admin_see_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_see_orders_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
         await query.answer()
     except:
         pass
 
+    if query.from_user.id != ADMIN_ID:
+        return
+
     orders = get_all_pending()
     if not orders:
         try:
-            await query.answer("✅ Tidak ada pesanan yang menunggu.", show_alert=True)
+            await query.edit_message_text("✅ Tidak ada pesanan yang menunggu konfirmasi saat ini.")
         except:
             pass
         return
@@ -699,7 +721,7 @@ async def admin_see_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = f"📋 *Pesanan Menunggu Konfirmasi ({len(orders)})*\n━━━━━━━━━━━━━━━━━━━━\n\n"
     keyboard = []
     for o in orders:
-        paket = PAKET[o[3]]
+        paket = PAKET.get(o[3], {"emoji": "❓", "nama": "Unknown"})
         text += f"• {o[2]} — {paket['emoji']} {paket['nama']} — {o[6]}\n"
         keyboard.append(
             [
@@ -710,301 +732,263 @@ async def admin_see_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     try:
-        await query.message.delete()
+        await query.edit_message_text(
+            text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     except:
-        pass
-
-    await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
 
-async def admin_proses_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def proses_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
         await query.answer()
     except:
         pass
 
-    user_id = int(query.data.replace("proses_", ""))
-    order = get_order(user_id)
+    if query.from_user.id != ADMIN_ID:
+        return
+
+    target_user_id = int(query.data.split("_")[1])
+
+    conn = sqlite3.connect("orders.db")
+    c = conn.cursor()
+    c.execute(
+        "SELECT * FROM orders WHERE user_id=? AND status='pending' ORDER BY id DESC LIMIT 1",
+        (target_user_id,),
+    )
+    order = c.fetchone()
+    conn.close()
 
     if not order:
         try:
-            await query.edit_message_text(
-                "⚠️ Pesanan tidak ditemukan atau sudah diproses."
-            )
+            await query.edit_message_text("⚠️ Pesanan tidak ditemukan atau sudah diproses.")
         except:
             pass
         return
 
-    paket = PAKET[order[3]]
-    caption = (
-        f"{paket['emoji']} *{paket['nama']}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"• Pembeli : *{order[2]}*\n"
-        f"• ID      : `{order[1]}`\n"
-        f"• Konten  : {paket['deskripsi']}\n"
-        f"• Total   : {format_harga(paket['harga'])}\n"
-        f"• Waktu   : {order[6]}"
-    )
+    paket = PAKET.get(order[3], {"emoji": "❓", "nama": "Unknown", "harga": 0})
 
     keyboard = [
         [
-            InlineKeyboardButton("✅ Konfirmasi", callback_data=f"confirm_{user_id}"),
-            InlineKeyboardButton("❌ Tolak", callback_data=f"reject_{user_id}"),
-        ],
-        [InlineKeyboardButton("← Kembali ke Daftar", callback_data="back_orders")],
+            InlineKeyboardButton("✅  Konfirmasi", callback_data=f"konfirm_{target_user_id}"),
+            InlineKeyboardButton("❌  Tolak", callback_data=f"tolak_{target_user_id}"),
+        ]
     ]
 
+    # Kirim bukti bayar ke admin
     try:
-        await query.message.delete()
-    except:
-        pass
-
-    foto_msg = await context.bot.send_photo(
-        chat_id=ADMIN_ID,
-        photo=order[4],
-        caption=caption,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-    simpan_admin_msg(context, user_id, foto_msg.message_id)
-
-
-async def back_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    try:
-        await query.answer()
-    except:
-        pass
-
-    try:
-        await query.message.delete()
-    except:
-        pass
-
-    orders = get_all_pending()
-    if not orders:
-        await context.bot.send_message(
-            chat_id=ADMIN_ID, text="✅ Tidak ada pesanan yang menunggu konfirmasi."
-        )
-        return
-
-    text = f"📋 *Pesanan Menunggu Konfirmasi ({len(orders)})*\n━━━━━━━━━━━━━━━━━━━━\n\n"
-    keyboard = []
-    for o in orders:
-        paket = PAKET[o[3]]
-        text += f"• {o[2]} — {paket['emoji']} {paket['nama']} — {o[6]}\n"
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    f"👤  Proses: {o[2]}", callback_data=f"proses_{o[1]}"
-                )
-            ]
-        )
-
-    await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-async def admin_konfirmasi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    try:
-        await query.answer()
-    except:
-        pass
-
-    parts = query.data.split("_")
-    action = parts[0]
-    user_id = int(parts[1])
-
-    order = get_order(user_id)
-    if not order:
-        try:
-            await query.edit_message_caption(
-                "⚠️ Pesanan tidak ditemukan atau sudah diproses."
-            )
-        except:
-            pass
-        return
-
-    paket = PAKET[order[3]]
-
-    if action == "confirm":
-        context.bot_data["waiting_link_for"] = user_id
-        try:
-            await query.edit_message_caption(
-                f"✅ *Pembayaran Dikonfirmasi*\n\n"
-                f"• Pembeli : *{order[2]}*\n"
-                f"• Paket   : {paket['emoji']} {paket['nama']}\n\n"
-                f"_Kirim link produk sekarang untuk diteruskan ke pembeli._",
-                parse_mode="Markdown",
-            )
-        except:
-            pass
-
-    elif action == "reject":
-        update_status(user_id, "rejected")
-        try:
-            await query.edit_message_caption(
-                f"❌ *Pembayaran Ditolak*\n\n"
-                f"• Pembeli : {order[2]}\n"
-                f"• Paket   : {paket['emoji']} {paket['nama']}",
-                parse_mode="Markdown",
-            )
-        except:
-            pass
-
-        try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "❌ *Pembayaran Tidak Dapat Dikonfirmasi*\n\n"
-                    "Bukti transfer yang kamu kirimkan tidak dapat diverifikasi.\n\n"
-                    "*Kemungkinan penyebab:*\n"
-                    "• Nominal transfer tidak sesuai\n"
-                    "• Screenshot tidak jelas atau terpotong\n"
-                    "• Transaksi belum berhasil\n\n"
-                    "Ketik /start untuk mencoba kembali atau hubungi admin jika ada pertanyaan."
-                ),
-                parse_mode="Markdown",
-            )
-        except:
-            pass
-
-        await hapus_admin_msg(context, user_id)
-
-
-async def admin_kirim_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.bot_data.get("waiting_broadcast"):
-        await kirim_broadcast(update, context)
-        return
-
-    user_id = context.bot_data.get("waiting_link_for")
-    if not user_id:
-        return
-
-    teks = update.message.text
-
-    if teks == "/batal":
-        context.bot_data.pop("waiting_link_for", None)
-        await update.message.reply_text("❌ Dibatalkan.")
-        return
-
-    order = get_order(user_id)
-    if not order:
-        await update.message.reply_text("⚠️ Pesanan tidak ditemukan.")
-        context.bot_data.pop("waiting_link_for", None)
-        return
-
-    paket = PAKET[order[3]]
-
-    try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=(
-                f"✅ *Pembayaran Berhasil Dikonfirmasi!*\n"
+        await context.bot.send_photo(
+            chat_id=ADMIN_ID,
+            photo=order[4],
+            caption=(
+                f"📋 *Detail Pesanan*\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"• Paket   : {paket['emoji']} {paket['nama']}\n"
-                f"• Konten  : {paket['deskripsi']}\n"
-                f"• Waktu   : {datetime.now().strftime('%H:%M, %d %b %Y')}\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"🔗 *Link Akses Produk:*\n{teks}\n\n"
-                f"_Simpan link ini baik-baik. Produk dapat diakses kapan saja._\n\n"
-                f"Terima kasih telah berbelanja di Hyper Family Buy! 🙏"
+                f"👤 Pembeli : {order[2]}\n"
+                f"📦 Paket   : {paket['emoji']} {paket['nama']}\n"
+                f"💰 Total   : {format_harga(paket['harga'])}\n"
+                f"🕐 Waktu   : {order[6]}\n\n"
+                f"Pilih tindakan di bawah:"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        try:
+            await query.message.delete()
+        except:
+            pass
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"⚠️ Gagal memuat bukti pembayaran: {e}",
+        )
+
+
+async def konfirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    try:
+        await query.answer()
+    except:
+        pass
+
+    if query.from_user.id != ADMIN_ID:
+        return
+
+    target_user_id = int(query.data.split("_")[1])
+    update_status(target_user_id, "completed")
+    await hapus_admin_msg(context, target_user_id)
+
+    try:
+        await query.edit_message_caption(
+            caption="✅ *Pesanan telah dikonfirmasi.*",
+            parse_mode="Markdown",
+        )
+    except:
+        pass
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                "🎉 *Pembayaran Dikonfirmasi!*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Terima kasih telah berbelanja di *Hyper Family Store*.\n\n"
+                "📦 Pesanan kamu sedang kami proses dan\n"
+                "akan segera dikirimkan.\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "_Jika ada pertanyaan, hubungi admin._"
             ),
             parse_mode="Markdown",
         )
     except:
         pass
 
-    update_status(user_id, "completed")
-    context.bot_data.pop("waiting_link_for", None)
-    await hapus_admin_msg(context, user_id)
 
-    await update.message.reply_text(
-        f"✅ Link produk berhasil dikirim ke *{order[2]}*.\n"
-        f"Pesanan telah ditandai selesai.",
-        parse_mode="Markdown",
-    )
-
-
-async def kirim_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pesan = update.message.text
-    if pesan == "/batal":
-        context.bot_data.pop("waiting_broadcast", None)
-        await update.message.reply_text("❌ Broadcast dibatalkan.")
-        return
-
-    context.bot_data.pop("waiting_broadcast", None)
-    users = get_all_users()
-    berhasil = 0
-    gagal = 0
-
-    await update.message.reply_text(
-        f"📤 Mengirim pesan ke {len(users)} buyer, mohon tunggu..."
-    )
-
-    for uid in users:
-        try:
-            await context.bot.send_message(
-                chat_id=uid,
-                text=f"📢 *Pesan dari Admin*\n━━━━━━━━━━━━━━━━━━━━\n\n{pesan}",
-                parse_mode="Markdown",
-            )
-            berhasil += 1
-        except (Forbidden, BadRequest):
-            gagal += 1
-        except:
-            gagal += 1
-
-    await update.message.reply_text(
-        f"✅ *Broadcast Selesai*\n\n"
-        f"• Terkirim : {berhasil} orang\n"
-        f"• Gagal    : {gagal} orang",
-        parse_mode="Markdown",
-    )
-
-
-async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def tolak_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
         await query.answer()
     except:
         pass
 
-    context.user_data.clear()
+    if query.from_user.id != ADMIN_ID:
+        return
+
+    target_user_id = int(query.data.split("_")[1])
+    update_status(target_user_id, "rejected")
+    await hapus_admin_msg(context, target_user_id)
+
+    try:
+        await query.edit_message_caption(
+            caption="❌ *Pesanan telah ditolak.*",
+            parse_mode="Markdown",
+        )
+    except:
+        pass
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                "❌ *Pembayaran Tidak Terverifikasi*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Maaf, bukti pembayaran yang kamu kirim\n"
+                "tidak dapat diverifikasi.\n\n"
+                "Kemungkinan penyebab:\n"
+                "• Nominal tidak sesuai\n"
+                "• Screenshot tidak jelas\n"
+                "• Transaksi tidak ditemukan\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "Silakan hubungi admin atau coba kembali\n"
+                "dengan ketik /start."
+            ),
+            parse_mode="Markdown",
+        )
+    except:
+        pass
+
+
+async def back_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    try:
+        await query.answer()
+    except:
+        pass
+
     user_id = query.from_user.id
 
+    # Batalkan pesanan waiting jika ada
     conn = sqlite3.connect("orders.db")
     c = conn.cursor()
-    c.execute("DELETE FROM orders WHERE user_id=? AND status='waiting'", (user_id,))
+    c.execute(
+        "UPDATE orders SET status='expired' WHERE user_id=? AND status='waiting'",
+        (user_id,),
+    )
     conn.commit()
     conn.close()
 
+    # Hapus job auto cancel jika ada
+    for job in context.job_queue.get_jobs_by_name(str(user_id)):
+        job.schedule_removal()
+
     try:
-        await query.edit_message_text(
-            teks_menu_utama(), parse_mode="Markdown", reply_markup=keyboard_menu_utama()
+        await query.message.delete()
+    except:
+        pass
+
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=teks_menu_utama(),
+        parse_mode="Markdown",
+        reply_markup=keyboard_menu_utama(),
+    )
+
+
+# =================== BROADCAST HANDLER ===================
+
+async def handle_admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    FIX BROADCAST: Handler ini khusus menangkap pesan teks dari admin
+    setelah /broadcast diketik. Sebelumnya bug karena tidak ada handler dedicated,
+    sehingga pesan pertama tidak terdeteksi sebagai broadcast.
+    """
+    user_id = update.message.from_user.id
+
+    if user_id != ADMIN_ID:
+        return
+
+    # Cek apakah admin sedang dalam mode broadcast
+    if not context.bot_data.get("waiting_broadcast"):
+        return
+
+    # FIX: Langsung proses tanpa perlu pesan konfirmasi dulu
+    context.bot_data.pop("waiting_broadcast", None)
+    text_broadcast = update.message.text
+
+    if text_broadcast.startswith("/"):
+        await update.message.reply_text("⚠️ Perintah tidak valid untuk broadcast.")
+        return
+
+    users = get_all_users()
+    berhasil = 0
+    gagal = 0
+
+    status_msg = await update.message.reply_text(
+        f"📤 *Mengirim broadcast ke {len(users)} buyer...*",
+        parse_mode="Markdown",
+    )
+
+    for uid in users:
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=(
+                    f"📢 *Pesan dari Admin*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"{text_broadcast}"
+                ),
+                parse_mode="Markdown",
+            )
+            berhasil += 1
+        except (Forbidden, BadRequest):
+            gagal += 1
+        except Exception:
+            gagal += 1
+
+    try:
+        await status_msg.edit_text(
+            f"✅ *Broadcast Selesai*\n\n"
+            f"• Terkirim : {berhasil} buyer\n"
+            f"• Gagal    : {gagal} buyer",
+            parse_mode="Markdown",
         )
     except:
-        try:
-            await query.message.delete()
-        except:
-            pass
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=teks_menu_utama(),
-            parse_mode="Markdown",
-            reply_markup=keyboard_menu_utama(),
-        )
+        pass
 
 
 # =================== MAIN ===================
@@ -1015,36 +999,39 @@ def main():
 
     app = Application.builder().token(TOKEN).post_init(post_init).build()
 
+    # User handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cek", cek_order))
-    app.add_handler(CommandHandler("pending", admin_pending))
+
+    # Admin handlers
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(CommandHandler("riwayat", admin_riwayat))
+    app.add_handler(CommandHandler("pending", admin_pending))
     app.add_handler(CommandHandler("broadcast", admin_broadcast_cmd))
+    app.add_handler(CommandHandler("batal", admin_batal_broadcast))
+
+    # Callback handlers
     app.add_handler(CallbackQueryHandler(buy_callback, pattern="^buy$"))
-    app.add_handler(CallbackQueryHandler(back_start, pattern="^back_start$"))
-    app.add_handler(CallbackQueryHandler(back_orders, pattern="^back_orders$"))
-    app.add_handler(
-        CallbackQueryHandler(admin_see_orders, pattern="^admin_see_orders$")
-    )
     app.add_handler(CallbackQueryHandler(pilih_paket, pattern="^pilih_"))
-    app.add_handler(CallbackQueryHandler(admin_proses_order, pattern="^proses_"))
-    app.add_handler(
-        CallbackQueryHandler(admin_konfirmasi, pattern="^(confirm|reject)_")
-    )
+    app.add_handler(CallbackQueryHandler(back_start_callback, pattern="^back_start$"))
+    app.add_handler(CallbackQueryHandler(admin_see_orders_callback, pattern="^admin_see_orders$"))
+    app.add_handler(CallbackQueryHandler(proses_order_callback, pattern="^proses_"))
+    app.add_handler(CallbackQueryHandler(konfirm_callback, pattern="^konfirm_"))
+    app.add_handler(CallbackQueryHandler(tolak_callback, pattern="^tolak_"))
 
-    app.add_handler(
-        MessageHandler(filters.PHOTO & ~filters.Chat(chat_id=ADMIN_ID), terima_bukti)
-    )
-
+    # FIX: Broadcast handler harus SEBELUM terima_bukti agar teks admin tertangkap lebih dulu
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.Chat(chat_id=ADMIN_ID),
-            admin_kirim_link,
+            filters.TEXT & filters.User(ADMIN_ID) & ~filters.COMMAND,
+            handle_admin_broadcast,
         )
     )
 
-    print("Bot aktif...")
+    # Bukti pembayaran dari user (foto)
+    app.add_handler(
+        MessageHandler(filters.PHOTO & ~filters.COMMAND, terima_bukti)
+    )
+
     app.run_polling()
 
 
