@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import threading
+import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from telegram import (
@@ -19,10 +20,16 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from telegram.error import BadRequest, Forbidden
+from telegram.error import BadRequest, Forbidden, TelegramError
+
+# =================== LOGGING ===================
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # =================== KEEP ALIVE ===================
-
 
 class PingHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -61,8 +68,88 @@ PAKET = {
     },
 }
 
-# =================== DATABASE ===================
+# =================== MESSAGE TRACKING ===================
 
+def track_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, user_id: int = None):
+    """Track bot messages for auto-deletion when user sends new commands."""
+    if "tracked_messages" not in context.bot_data:
+        context.bot_data["tracked_messages"] = {}
+    
+    key = user_id if user_id else chat_id
+    if key not in context.bot_data["tracked_messages"]:
+        context.bot_data["tracked_messages"][key] = []
+    
+    context.bot_data["tracked_messages"][key].append({
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "timestamp": datetime.now()
+    })
+    
+    # Keep only last 50 messages per user to prevent memory bloat
+    if len(context.bot_data["tracked_messages"][key]) > 50:
+        context.bot_data["tracked_messages"][key] = context.bot_data["tracked_messages"][key][-50:]
+
+
+async def delete_tracked_messages(context: ContextTypes.DEFAULT_TYPE, user_id: int, preserve_last: int = 0):
+    """Delete all tracked messages for a user. preserve_last=N keeps N most recent."""
+    if "tracked_messages" not in context.bot_data:
+        return
+    
+    messages = context.bot_data["tracked_messages"].get(user_id, [])
+    
+    # Sort by timestamp, oldest first
+    messages_to_delete = messages[:-preserve_last] if preserve_last > 0 else messages
+    
+    deleted_count = 0
+    for msg in messages_to_delete:
+        try:
+            await context.bot.delete_message(
+                chat_id=msg["chat_id"],
+                message_id=msg["message_id"]
+            )
+            deleted_count += 1
+        except (BadRequest, Forbidden, TelegramError) as e:
+            # Message might be too old or already deleted
+            logger.debug(f"Could not delete message {msg['message_id']}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error deleting message: {e}")
+    
+    # Update tracked messages list
+    if preserve_last > 0:
+        context.bot_data["tracked_messages"][user_id] = messages[-preserve_last:]
+    else:
+        context.bot_data["tracked_messages"][user_id] = []
+    
+    logger.info(f"Deleted {deleted_count} messages for user {user_id}")
+
+
+async def send_and_track(context, chat_id, text=None, photo=None, caption=None, 
+                         parse_mode="Markdown", reply_markup=None, user_id=None):
+    """Send message and track it for auto-deletion. Returns sent message."""
+    try:
+        if photo:
+            msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=caption,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup
+            )
+        else:
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup
+            )
+        
+        track_message(context, chat_id, msg.message_id, user_id or chat_id)
+        return msg
+    except Exception as e:
+        logger.error(f"Error sending message: {e}")
+        raise
+
+# =================== DATABASE ===================
 
 def init_db():
     conn = sqlite3.connect("orders.db")
@@ -165,7 +252,7 @@ def get_stats():
         SELECT COUNT(*),
         SUM(CASE WHEN paket_id='gb_biasa' THEN 5000 WHEN paket_id='gb_vip' THEN 25000 ELSE 0 END)
         FROM orders WHERE status='completed' AND waktu LIKE ?
-    """,
+        """,
         (f"%{today}%",),
     )
     hari_order, hari_pendapatan = c.fetchone()
@@ -199,68 +286,21 @@ def format_harga(harga):
     return f"Rp {harga:,}".replace(",", ".")
 
 
-def keyboard_hubungi_admin():
-    """Keyboard tombol hubungi admin untuk pesan error."""
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("💬 Hubungi Admin", url=f"tg://user?id={ADMIN_ID}")]]
-    )
-
-
-# =================== HELPER: SIMPAN & HAPUS PESAN ===================
-
-
-def simpan_msg_user(context, user_id, message_id):
-    """Simpan message_id pesan /start user untuk dihapus nanti."""
-    context.bot_data.setdefault("user_start_messages", {})
-    context.bot_data["user_start_messages"].setdefault(user_id, [])
-    context.bot_data["user_start_messages"][user_id].append(message_id)
-
-
-async def hapus_msg_user_lama(context, chat_id):
-    """Hapus semua pesan /start user sebelumnya."""
-    msgs = context.bot_data.get("user_start_messages", {}).pop(chat_id, [])
-    for msg_id in msgs:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except Exception:
-            pass
-
-
 def simpan_admin_msg(context, user_id, message_id):
-    """Simpan message_id notif admin yang terkait order user tertentu."""
     context.bot_data.setdefault("admin_messages", {})
     context.bot_data["admin_messages"].setdefault(user_id, [])
     context.bot_data["admin_messages"][user_id].append(message_id)
 
 
 async def hapus_admin_msg(context, user_id):
-    """Hapus semua pesan admin yang terkait order user tertentu."""
     msg_ids = context.bot_data.get("admin_messages", {}).pop(user_id, [])
     for msg_id in msg_ids:
         try:
             await context.bot.delete_message(chat_id=ADMIN_ID, message_id=msg_id)
-        except Exception:
+        except (BadRequest, Forbidden, TelegramError):
             pass
-
-
-def simpan_order_msg_admin(context, user_id, message_id):
-    """Simpan message_id chat admin yang terkait proses order (foto bukti, konfirmasi, dll)."""
-    context.bot_data.setdefault("order_process_messages", {})
-    context.bot_data["order_process_messages"].setdefault(user_id, [])
-    context.bot_data["order_process_messages"][user_id].append(message_id)
-
-
-async def hapus_order_msg_admin(context, user_id):
-    """Hapus semua chat admin terkait proses order setelah link dikirim."""
-    msg_ids = context.bot_data.get("order_process_messages", {}).pop(user_id, [])
-    for msg_id in msg_ids:
-        try:
-            await context.bot.delete_message(chat_id=ADMIN_ID, message_id=msg_id)
-        except Exception:
-            pass
-
-
-# =================== TEKS & KEYBOARD ===================
+        except Exception as e:
+            logger.error(f"Error deleting admin message: {e}")
 
 
 def teks_menu_utama():
@@ -291,9 +331,7 @@ def keyboard_menu_utama():
         ]
     )
 
-
 # =================== POST INIT ===================
-
 
 async def post_init(application: Application):
     await application.bot.set_my_commands(
@@ -317,61 +355,41 @@ async def post_init(application: Application):
         cek_pending_lama, interval=timedelta(minutes=30), first=timedelta(minutes=30)
     )
 
-
 # =================== HANDLERS ===================
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    chat_id = update.effective_chat.id
     simpan_user(user.id, user.full_name)
-
-    # Reset state
+    
+    # Clear any pending states
     context.bot_data.pop("waiting_broadcast", None)
-    context.user_data.pop("paket_id", None)
-
-    # Cek apakah user masih punya order pending
-    order = get_order(user.id)
-    if order and order[5] == "pending":
-        await hapus_msg_user_lama(context, chat_id)
-        paket = PAKET.get(order[3], {"emoji": "📦", "nama": "Unknown"})
-        msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                "🔍 *Pesanan Sedang Diverifikasi*\n"
-                "━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"Kamu masih memiliki pesanan aktif:\n"
-                f"• Paket  : {paket['emoji']} {paket['nama']}\n"
-                f"• Status : 🔍 Sedang diverifikasi admin\n\n"
-                "Mohon tunggu konfirmasi dari admin.\n"
-                "Estimasi: *1–5 menit*.\n\n"
-                "_Jika ada masalah, silakan hubungi admin._"
-            ),
-            parse_mode="Markdown",
-            reply_markup=keyboard_hubungi_admin(),
-        )
-        simpan_msg_user(context, chat_id, msg.message_id)
-        return
-
-    # Hapus pesan bot sebelumnya (menu lama, dll)
-    await hapus_msg_user_lama(context, chat_id)
-
-    # Kirim menu baru & simpan message_id-nya
-    msg = await context.bot.send_message(
-        chat_id=chat_id,
+    if user.id == ADMIN_ID:
+        context.bot_data.pop("waiting_link_for", None)
+    
+    # Delete previous BOT messages from this user only (NOT user commands)
+    await delete_tracked_messages(context, user.id)
+    
+    # Send new menu
+    await send_and_track(
+        context,
+        chat_id=update.effective_chat.id,
         text=teks_menu_utama(),
         parse_mode="Markdown",
         reply_markup=keyboard_menu_utama(),
+        user_id=user.id
     )
-    simpan_msg_user(context, chat_id, msg.message_id)
 
 
 async def cek_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    
+    # Delete previous BOT messages only (NOT user commands)
+    await delete_tracked_messages(context, user_id)
+    
     order = get_last_order(user_id)
-
     if not order:
-        msg = await context.bot.send_message(
+        await send_and_track(
+            context,
             chat_id=update.effective_chat.id,
             text=(
                 "📭 *Belum Ada Pesanan*\n\n"
@@ -379,10 +397,10 @@ async def cek_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Ketik /start untuk mulai berbelanja."
             ),
             parse_mode="Markdown",
+            user_id=user_id
         )
-        simpan_msg_user(context, update.effective_chat.id, msg.message_id)
         return
-
+    
     paket = PAKET.get(order[3], {"nama": "Tidak diketahui", "emoji": "❓", "harga": 0})
     status_map = {
         "waiting": ("⏳", "Menunggu bukti pembayaran"),
@@ -392,7 +410,9 @@ async def cek_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "expired": ("⌛", "Sesi pembayaran berakhir"),
     }
     emoji_s, label_s = status_map.get(order[5], ("❓", order[5]))
-    msg = await context.bot.send_message(
+    
+    await send_and_track(
+        context,
         chat_id=update.effective_chat.id,
         text=(
             f"📦 *Status Pesanan Terakhir*\n"
@@ -405,37 +425,30 @@ async def cek_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"_Butuh bantuan? Silakan hubungi admin._"
         ),
         parse_mode="Markdown",
+        user_id=user_id
     )
-    simpan_msg_user(context, update.effective_chat.id, msg.message_id)
 
 
 async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
         await query.answer()
-    except Exception:
+    except (BadRequest, TelegramError):
         pass
+    
     user_id = query.from_user.id
     order = get_order(user_id)
+    
     if order and order[5] == "pending":
-        paket = PAKET.get(order[3], {"emoji": "📦", "nama": "Unknown"})
         try:
-            await query.edit_message_text(
-                "🔍 *Pesanan Sedang Diverifikasi*\n"
-                "━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"Kamu masih memiliki pesanan aktif:\n"
-                f"• Paket  : {paket['emoji']} {paket['nama']}\n"
-                f"• Status : 🔍 Sedang diverifikasi admin\n\n"
-                "Mohon tunggu konfirmasi dari admin.\n"
-                "Estimasi: *1–5 menit*.\n\n"
-                "_Jika ada masalah, silakan hubungi admin._",
-                parse_mode="Markdown",
-                reply_markup=keyboard_hubungi_admin(),
+            await query.answer(
+                "⚠️ Kamu masih memiliki pesanan yang sedang diverifikasi. Mohon tunggu konfirmasi admin.",
+                show_alert=True,
             )
-        except Exception:
+        except (BadRequest, TelegramError):
             pass
         return
-
+    
     text = (
         "📦 *Pilih Paket*\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -452,21 +465,40 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👑  Gb Vip — Rp 25.000", callback_data="pilih_gb_vip")],
         [InlineKeyboardButton("← Kembali", callback_data="back_start")],
     ]
+    
     try:
         await query.edit_message_text(
             text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
         )
-    except Exception:
-        pass
+    except (BadRequest, TelegramError) as e:
+        logger.error(f"Error editing buy message: {e}")
+        # If edit fails, delete old and send new
+        try:
+            await query.message.delete()
+        except:
+            pass
+        await send_and_track(
+            context,
+            chat_id=update.effective_chat.id,
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            user_id=user_id
+        )
 
 
 async def pilih_paket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
         await query.answer()
-    except Exception:
+    except (BadRequest, TelegramError):
         pass
+    
     paket_id = query.data.replace("pilih_", "")
+    if paket_id not in PAKET:
+        logger.error(f"Invalid paket_id: {paket_id}")
+        return
+    
     paket = PAKET[paket_id]
     user_id = query.from_user.id
     user_name = query.from_user.full_name
@@ -506,36 +538,30 @@ async def pilih_paket(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await query.message.delete()
-    except Exception:
+    except (BadRequest, TelegramError):
         pass
 
     if not os.path.exists(QRIS_PHOTO_PATH):
-        msg = await context.bot.send_message(
+        await send_and_track(
+            context,
             chat_id=update.effective_chat.id,
-            text=(
-                "⚠️ *QRIS Tidak Tersedia*\n\n"
-                "QRIS sedang tidak tersedia saat ini.\n"
-                "Silakan hubungi admin untuk melanjutkan pembayaran."
-            ),
-            parse_mode="Markdown",
-            reply_markup=keyboard_hubungi_admin(),
+            text="⚠️ QRIS tidak tersedia saat ini. Silakan hubungi admin.",
+            user_id=user_id
         )
-        simpan_msg_user(context, update.effective_chat.id, msg.message_id)
         return
 
     with open(QRIS_PHOTO_PATH, "rb") as photo:
-        msg = await context.bot.send_photo(
+        msg = await send_and_track(
+            context,
             chat_id=update.effective_chat.id,
             photo=photo,
             caption=caption,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
+            user_id=user_id
         )
-    # Simpan pesan QRIS agar bisa dihapus saat /start lagi
-    simpan_msg_user(context, update.effective_chat.id, msg.message_id)
 
-    # Set auto cancel job
-    # Hapus job lama kalau ada
+    # Cancel any existing auto-cancel jobs for this user
     for job in context.job_queue.get_jobs_by_name(str(user_id)):
         job.schedule_removal()
 
@@ -558,6 +584,7 @@ async def auto_cancel(context: ContextTypes.DEFAULT_TYPE):
     )
     conn.commit()
     conn.close()
+    
     try:
         await context.bot.send_message(
             chat_id=user_id,
@@ -565,13 +592,11 @@ async def auto_cancel(context: ContextTypes.DEFAULT_TYPE):
                 "⌛ *Sesi Pembayaran Berakhir*\n\n"
                 "Pesanan kamu dibatalkan secara otomatis karena\n"
                 "melebihi batas waktu 30 menit.\n\n"
-                "Ketik /start untuk membuat pesanan baru.\n"
-                "Jika ada kendala, silakan hubungi admin."
+                "Ketik /start untuk membuat pesanan baru."
             ),
             parse_mode="Markdown",
-            reply_markup=keyboard_hubungi_admin(),
         )
-    except Exception:
+    except (BadRequest, Forbidden, TelegramError):
         pass
 
 
@@ -592,7 +617,7 @@ async def cek_pending_lama(context: ContextTypes.DEFAULT_TYPE):
                     [[InlineKeyboardButton("📋 Lihat Pesanan", callback_data="admin_see_orders")]]
                 ),
             )
-        except Exception:
+        except (BadRequest, Forbidden, TelegramError):
             pass
 
 
@@ -600,25 +625,26 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
 
-    # Abaikan foto dari admin supaya tidak bentrok
-    if user_id == ADMIN_ID:
-        return
+    # Delete the photo message from user to keep chat clean
+    try:
+        await update.message.delete()
+    except (BadRequest, Forbidden, TelegramError):
+        pass
 
     order = get_order(user_id)
     if order and order[5] == "pending":
-        msg = await context.bot.send_message(
-            chat_id=user_id,
+        await send_and_track(
+            context,
+            chat_id=update.effective_chat.id,
             text=(
                 "🔍 *Pembayaran Sedang Diverifikasi*\n\n"
                 "Bukti pembayaran kamu sudah kami terima dan\n"
                 "sedang dalam proses verifikasi oleh admin.\n\n"
-                "_Mohon tunggu, proses biasanya memakan waktu 1–5 menit._\n\n"
-                "Jika ada kendala, silakan hubungi admin."
+                "_Mohon tunggu, proses biasanya memakan waktu 1–5 menit._"
             ),
             parse_mode="Markdown",
-            reply_markup=keyboard_hubungi_admin(),
+            user_id=user_id
         )
-        simpan_msg_user(context, user_id, msg.message_id)
         return
 
     paket_id = context.user_data.get("paket_id")
@@ -634,24 +660,20 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if row:
             paket_id = row[0]
         else:
-            msg = await context.bot.send_message(
-                chat_id=user_id,
+            await send_and_track(
+                context,
+                chat_id=update.effective_chat.id,
                 text=(
                     "⚠️ *Tidak Ada Pesanan Aktif*\n\n"
                     "Kamu belum memilih paket atau sesi telah berakhir.\n"
-                    "Ketik /start untuk memulai pemesanan baru.\n\n"
-                    "Jika kamu merasa ini kesalahan, silakan hubungi admin."
+                    "Ketik /start untuk memulai pemesanan baru."
                 ),
                 parse_mode="Markdown",
-                reply_markup=keyboard_hubungi_admin(),
+                user_id=user_id
             )
-            simpan_msg_user(context, user_id, msg.message_id)
             return
 
-    paket = PAKET.get(paket_id)
-    if not paket:
-        return
-
+    paket = PAKET[paket_id]
     file_id = update.message.photo[-1].file_id
 
     conn = sqlite3.connect("orders.db")
@@ -663,11 +685,12 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    # Cancel auto-expire job
+    # Cancel auto-cancel job
     for job in context.job_queue.get_jobs_by_name(str(user_id)):
         job.schedule_removal()
 
-    msg = await context.bot.send_message(
+    await send_and_track(
+        context,
         chat_id=user_id,
         text=(
             f"✅ *Bukti Pembayaran Diterima*\n"
@@ -681,8 +704,8 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"_Harap tetap di chat ini dan jangan menutup aplikasi._"
         ),
         parse_mode="Markdown",
+        user_id=user_id
     )
-    simpan_msg_user(context, user_id, msg.message_id)
 
     notif_msg = await context.bot.send_message(
         chat_id=ADMIN_ID,
@@ -700,76 +723,118 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ),
     )
     simpan_admin_msg(context, user_id, notif_msg.message_id)
-    simpan_order_msg_admin(context, user_id, notif_msg.message_id)
 
 
 # =================== ADMIN ===================
 
-
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         return
+    
     s = get_stats()
-    await update.message.reply_text(
-        f"📊 *Statistik Penjualan*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👥 Total buyer terdaftar : *{s['total_user']} orang*\n\n"
-        f"📅 *Hari Ini:*\n"
-        f"• Transaksi selesai : {s['hari_order']}\n"
-        f"• Pendapatan        : *{format_harga(s['hari_pendapatan'])}*\n\n"
-        f"📈 *Total Keseluruhan:*\n"
-        f"• Transaksi selesai : {s['total_order']}\n"
-        f"• Total pendapatan  : *{format_harga(s['total_pendapatan'])}*\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"⏳ Menunggu konfirmasi : *{s['pending_count']} pesanan*",
+    await send_and_track(
+        context,
+        chat_id=ADMIN_ID,
+        text=(
+            f"📊 *Statistik Penjualan*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👥 Total buyer terdaftar : *{s['total_user']} orang*\n\n"
+            f"📅 *Hari Ini:*\n"
+            f"• Transaksi selesai : {s['hari_order']}\n"
+            f"• Pendapatan        : *{format_harga(s['hari_pendapatan'])}*\n\n"
+            f"📈 *Total Keseluruhan:*\n"
+            f"• Transaksi selesai : {s['total_order']}\n"
+            f"• Total pendapatan  : *{format_harga(s['total_pendapatan'])}*\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"⏳ Menunggu konfirmasi : *{s['pending_count']} pesanan*"
+        ),
         parse_mode="Markdown",
+        user_id=ADMIN_ID
     )
 
 
 async def admin_riwayat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         return
+    
     orders = get_riwayat()
     if not orders:
-        await update.message.reply_text("📭 Belum ada transaksi yang selesai.")
+        await send_and_track(
+            context,
+            chat_id=ADMIN_ID,
+            text="📭 Belum ada transaksi yang selesai.",
+            user_id=ADMIN_ID
+        )
         return
+    
     text = "📜 *Riwayat Transaksi (20 Terakhir)*\n━━━━━━━━━━━━━━━━━━━━\n\n"
     for i, o in enumerate(orders, 1):
         paket = PAKET.get(o[3], {"emoji": "❓", "nama": "Unknown", "harga": 0})
         text += f"{i}. *{o[2]}* — {paket['emoji']} {paket['nama']} — {format_harga(paket['harga'])}\n   _{o[6]}_\n\n"
-    await update.message.reply_text(text, parse_mode="Markdown")
+    
+    await send_and_track(
+        context,
+        chat_id=ADMIN_ID,
+        text=text,
+        parse_mode="Markdown",
+        user_id=ADMIN_ID
+    )
 
 
 async def admin_broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         return
+    
     users = get_all_users()
     context.bot_data["waiting_broadcast"] = True
-    await update.message.reply_text(
-        f"📢 *Mode Broadcast*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"Total penerima: *{len(users)} buyer*\n\n"
-        f"Ketik pesan yang ingin dikirim sekarang.\n\n"
-        f"_Kirim /batal untuk membatalkan._",
+    # Clear waiting_link_for to prevent conflict
+    context.bot_data.pop("waiting_link_for", None)
+    
+    await send_and_track(
+        context,
+        chat_id=ADMIN_ID,
+        text=(
+            f"📢 *Mode Broadcast*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Total penerima: *{len(users)} buyer*\n\n"
+            f"Ketik pesan yang ingin dikirim sekarang.\n\n"
+            f"_Kirim /batal untuk membatalkan._"
+        ),
         parse_mode="Markdown",
+        user_id=ADMIN_ID
     )
 
 
 async def admin_batal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         return
+    
     context.bot_data.pop("waiting_broadcast", None)
     context.bot_data.pop("waiting_link_for", None)
-    await update.message.reply_text("❌ *Dibatalkan.*", parse_mode="Markdown")
+    
+    await send_and_track(
+        context,
+        chat_id=ADMIN_ID,
+        text="❌ *Dibatalkan.*",
+        parse_mode="Markdown",
+        user_id=ADMIN_ID
+    )
 
 
 async def admin_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         return
+    
     orders = get_all_pending()
     if not orders:
-        await update.message.reply_text("✅ Tidak ada pesanan yang menunggu konfirmasi saat ini.")
+        await send_and_track(
+            context,
+            chat_id=ADMIN_ID,
+            text="✅ Tidak ada pesanan yang menunggu konfirmasi saat ini.",
+            user_id=ADMIN_ID
+        )
         return
+    
     text = f"📋 *Pesanan Menunggu Konfirmasi ({len(orders)})*\n━━━━━━━━━━━━━━━━━━━━\n\n"
     keyboard = []
     for o in orders:
@@ -778,8 +843,14 @@ async def admin_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append(
             [InlineKeyboardButton(f"👤  Proses: {o[2]}", callback_data=f"proses_{o[1]}")]
         )
-    await update.message.reply_text(
-        text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
+    
+    await send_and_track(
+        context,
+        chat_id=ADMIN_ID,
+        text=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        user_id=ADMIN_ID
     )
 
 
@@ -787,17 +858,20 @@ async def admin_see_orders_callback(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     try:
         await query.answer()
-    except Exception:
+    except (BadRequest, TelegramError):
         pass
+    
     if query.from_user.id != ADMIN_ID:
         return
+    
     orders = get_all_pending()
     if not orders:
         try:
             await query.edit_message_text("✅ Tidak ada pesanan yang menunggu konfirmasi saat ini.")
-        except Exception:
+        except (BadRequest, TelegramError):
             pass
         return
+    
     text = f"📋 *Pesanan Menunggu Konfirmasi ({len(orders)})*\n━━━━━━━━━━━━━━━━━━━━\n\n"
     keyboard = []
     for o in orders:
@@ -806,26 +880,29 @@ async def admin_see_orders_callback(update: Update, context: ContextTypes.DEFAUL
         keyboard.append(
             [InlineKeyboardButton(f"👤  Proses: {o[2]}", callback_data=f"proses_{o[1]}")]
         )
+    
     try:
         await query.edit_message_text(
             text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
         )
-    except Exception:
-        msg = await context.bot.send_message(
+    except (BadRequest, TelegramError):
+        await send_and_track(
+            context,
             chat_id=ADMIN_ID,
             text=text,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
+            user_id=ADMIN_ID
         )
-        # Simpan pesan daftar order agar bisa dihapus nanti (tidak terkait user tertentu)
 
 
 async def proses_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
         await query.answer()
-    except Exception:
+    except (BadRequest, TelegramError):
         pass
+    
     if query.from_user.id != ADMIN_ID:
         return
 
@@ -843,7 +920,7 @@ async def proses_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if not order:
         try:
             await query.edit_message_text("⚠️ Pesanan tidak ditemukan atau sudah diproses.")
-        except Exception:
+        except (BadRequest, TelegramError):
             pass
         return
 
@@ -855,14 +932,8 @@ async def proses_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
         ]
     ]
 
-    # Hapus pesan list sebelumnya
     try:
-        await query.message.delete()
-    except Exception:
-        pass
-
-    try:
-        foto_msg = await context.bot.send_photo(
+        await context.bot.send_photo(
             chat_id=ADMIN_ID,
             photo=order[4],
             caption=(
@@ -877,20 +948,34 @@ async def proses_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
-        # Simpan pesan foto bukti agar bisa dihapus setelah order selesai
-        simpan_order_msg_admin(context, target_user_id, foto_msg.message_id)
+        try:
+            await query.message.delete()
+        except (BadRequest, TelegramError):
+            pass
     except Exception as e:
-        await context.bot.send_message(
-            chat_id=ADMIN_ID, text=f"⚠️ Gagal memuat bukti pembayaran: {e}"
+        logger.error(f"Error sending payment proof: {e}")
+        await send_and_track(
+            context,
+            chat_id=ADMIN_ID,
+            text=f"⚠️ Gagal memuat bukti pembayaran: {e}",
+            user_id=ADMIN_ID
         )
 
 
 async def konfirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Alur setelah admin tekan Konfirmasi:
+    1. Status order → 'completed'
+    2. Buyer diberi tahu pembayaran dikonfirmasi & link sedang disiapkan
+    3. Bot minta admin kirim link konten
+    4. Admin kirim link → bot teruskan ke buyer
+    """
     query = update.callback_query
     try:
         await query.answer()
-    except Exception:
+    except (BadRequest, TelegramError):
         pass
+    
     if query.from_user.id != ADMIN_ID:
         return
 
@@ -907,10 +992,8 @@ async def konfirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not order:
         try:
-            await query.edit_message_caption(
-                caption="⚠️ Pesanan tidak ditemukan.", parse_mode="Markdown"
-            )
-        except Exception:
+            await query.edit_message_caption(caption="⚠️ Pesanan tidak ditemukan.", parse_mode="Markdown")
+        except (BadRequest, TelegramError):
             pass
         return
 
@@ -919,7 +1002,7 @@ async def konfirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_status(target_user_id, "completed")
     await hapus_admin_msg(context, target_user_id)
 
-    # Update caption foto bukti di chat admin jadi status confirmed
+    # Update caption foto bukti bayar di chat admin
     try:
         await query.edit_message_caption(
             caption=(
@@ -929,12 +1012,12 @@ async def konfirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
             parse_mode="Markdown",
         )
-    except Exception:
+    except (BadRequest, TelegramError):
         pass
 
     # Beritahu buyer bahwa pembayaran sudah dikonfirmasi
     try:
-        konfirm_msg = await context.bot.send_message(
+        await context.bot.send_message(
             chat_id=target_user_id,
             text=(
                 "🎉 *Pembayaran Dikonfirmasi!*\n"
@@ -947,21 +1030,22 @@ async def konfirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
             parse_mode="Markdown",
         )
-        simpan_msg_user(context, target_user_id, konfirm_msg.message_id)
-    except Exception:
+    except (BadRequest, Forbidden, TelegramError):
         pass
 
-    # Simpan data untuk pengiriman link
+    # Simpan data untuk pengiriman link - PRIORITAS TERTINGGI
+    # Clear broadcast mode to prevent conflict
+    context.bot_data.pop("waiting_broadcast", None)
+    
     context.bot_data["waiting_link_for"] = {
         "user_id": target_user_id,
         "user_name": order[2],
         "paket": paket,
-        # Simpan message_id foto bukti agar bisa dihapus setelah link terkirim
-        "foto_msg_id": query.message.message_id,
     }
 
-    # Minta admin kirim link konten
-    link_req_msg = await context.bot.send_message(
+    # Minta admin kirim link
+    await send_and_track(
+        context,
         chat_id=ADMIN_ID,
         text=(
             f"🔗 *Kirim Link Konten*\n"
@@ -972,16 +1056,17 @@ async def konfirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"_Ketik /batal untuk membatalkan._"
         ),
         parse_mode="Markdown",
+        user_id=ADMIN_ID
     )
-    simpan_order_msg_admin(context, target_user_id, link_req_msg.message_id)
 
 
 async def tolak_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
         await query.answer()
-    except Exception:
+    except (BadRequest, TelegramError):
         pass
+    
     if query.from_user.id != ADMIN_ID:
         return
 
@@ -989,14 +1074,9 @@ async def tolak_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_status(target_user_id, "rejected")
     await hapus_admin_msg(context, target_user_id)
 
-    # Hapus semua chat admin terkait order ini
-    await hapus_order_msg_admin(context, target_user_id)
-
     try:
-        await query.edit_message_caption(
-            caption="❌ *Pesanan telah ditolak.*", parse_mode="Markdown"
-        )
-    except Exception:
+        await query.edit_message_caption(caption="❌ *Pesanan telah ditolak.*", parse_mode="Markdown")
+    except (BadRequest, TelegramError):
         pass
 
     try:
@@ -1016,9 +1096,8 @@ async def tolak_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "dengan ketik /start."
             ),
             parse_mode="Markdown",
-            reply_markup=keyboard_hubungi_admin(),
         )
-    except Exception:
+    except (BadRequest, Forbidden, TelegramError):
         pass
 
 
@@ -1026,10 +1105,10 @@ async def back_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     try:
         await query.answer()
-    except Exception:
+    except (BadRequest, TelegramError):
         pass
+    
     user_id = query.from_user.id
-    chat_id = update.effective_chat.id
 
     conn = sqlite3.connect("orders.db")
     c = conn.cursor()
@@ -1040,36 +1119,31 @@ async def back_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     conn.commit()
     conn.close()
 
-    # Hapus auto cancel job
     for job in context.job_queue.get_jobs_by_name(str(user_id)):
         job.schedule_removal()
 
-    # Hapus pesan QRIS / menu lama
     try:
         await query.message.delete()
-    except Exception:
+    except (BadRequest, Forbidden, TelegramError):
         pass
 
-    # Hapus sisa pesan lama
-    await hapus_msg_user_lama(context, chat_id)
-
-    msg = await context.bot.send_message(
-        chat_id=chat_id,
+    await send_and_track(
+        context,
+        chat_id=update.effective_chat.id,
         text=teks_menu_utama(),
         parse_mode="Markdown",
         reply_markup=keyboard_menu_utama(),
+        user_id=user_id
     )
-    simpan_msg_user(context, chat_id, msg.message_id)
 
 
 # =================== ADMIN TEXT HANDLER ===================
-
 
 async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Menangani semua pesan teks dari admin.
     Prioritas:
-      1. Jika waiting_link_for aktif → kirim link ke buyer, hapus chat order admin
+      1. Jika waiting_link_for aktif → kirim link ke buyer
       2. Jika waiting_broadcast aktif → broadcast ke semua buyer
     """
     if update.message.from_user.id != ADMIN_ID:
@@ -1077,18 +1151,23 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text_input = update.message.text
 
+    # Delete admin's text message to keep chat clean
+    try:
+        await update.message.delete()
+    except (BadRequest, Forbidden, TelegramError):
+        pass
+
     # ── PRIORITAS 1: Kirim link ke buyer ──
     link_data = context.bot_data.get("waiting_link_for")
     if link_data:
         target_user_id = link_data["user_id"]
         target_name = link_data["user_name"]
         paket = link_data["paket"]
-        foto_msg_id = link_data.get("foto_msg_id")
 
         context.bot_data.pop("waiting_link_for", None)
 
         try:
-            link_msg = await context.bot.send_message(
+            await context.bot.send_message(
                 chat_id=target_user_id,
                 text=(
                     f"📦 *Pesanan Siap!*\n"
@@ -1104,43 +1183,30 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
                 disable_web_page_preview=False,
             )
-            # Simpan pesan link agar bisa dihapus kalau user /start
-            simpan_msg_user(context, target_user_id, link_msg.message_id)
-
-            # Konfirmasi ke admin
-            konfirm_admin_msg = await update.message.reply_text(
-                f"✅ *Link Berhasil Dikirim!*\n\n"
-                f"👤 Penerima : {target_name}\n"
-                f"📦 Paket    : {paket['emoji']} {paket['nama']}\n"
-                f"🔗 Link     : {text_input}",
+            await send_and_track(
+                context,
+                chat_id=ADMIN_ID,
+                text=(
+                    f"✅ *Link Berhasil Dikirim!*\n\n"
+                    f"👤 Penerima : {target_name}\n"
+                    f"📦 Paket    : {paket['emoji']} {paket['nama']}\n"
+                    f"🔗 Link     : {text_input}"
+                ),
                 parse_mode="Markdown",
+                user_id=ADMIN_ID
             )
-            simpan_order_msg_admin(context, target_user_id, konfirm_admin_msg.message_id)
-
         except Exception as e:
-            await update.message.reply_text(
-                f"⚠️ Gagal mengirim link ke buyer.\nError: {e}\n\n"
-                f"Coba kirim manual ke user ID: `{target_user_id}`",
+            logger.error(f"Error sending link to buyer: {e}")
+            await send_and_track(
+                context,
+                chat_id=ADMIN_ID,
+                text=(
+                    f"⚠️ Gagal mengirim link ke buyer.\nError: {e}\n\n"
+                    f"Coba kirim manual ke user ID: `{target_user_id}`"
+                ),
                 parse_mode="Markdown",
+                user_id=ADMIN_ID
             )
-            return
-
-        # Hapus semua chat admin terkait order ini (foto bukti, request link, konfirmasi)
-        # Termasuk foto bukti yang message_id-nya disimpan di link_data
-        if foto_msg_id:
-            try:
-                await context.bot.delete_message(chat_id=ADMIN_ID, message_id=foto_msg_id)
-            except Exception:
-                pass
-
-        await hapus_order_msg_admin(context, target_user_id)
-
-        # Juga hapus pesan teks link yang baru dikirim admin itu sendiri
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
-
         return
 
     # ── PRIORITAS 2: Broadcast ──
@@ -1148,16 +1214,24 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot_data.pop("waiting_broadcast", None)
 
         if text_input.startswith("/"):
-            await update.message.reply_text("⚠️ Perintah tidak valid untuk broadcast.")
+            await send_and_track(
+                context,
+                chat_id=ADMIN_ID,
+                text="⚠️ Perintah tidak valid untuk broadcast.",
+                user_id=ADMIN_ID
+            )
             return
 
         users = get_all_users()
         berhasil = 0
         gagal = 0
 
-        status_msg = await update.message.reply_text(
-            f"📤 *Mengirim broadcast ke {len(users)} buyer...*",
+        status_msg = await send_and_track(
+            context,
+            chat_id=ADMIN_ID,
+            text=f"📤 *Mengirim broadcast ke {len(users)} buyer...*",
             parse_mode="Markdown",
+            user_id=ADMIN_ID
         )
 
         for uid in users:
@@ -1172,7 +1246,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown",
                 )
                 berhasil += 1
-            except (Forbidden, BadRequest):
+            except (Forbidden, BadRequest, TelegramError):
                 gagal += 1
             except Exception:
                 gagal += 1
@@ -1184,13 +1258,12 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• Gagal    : {gagal} buyer",
                 parse_mode="Markdown",
             )
-        except Exception:
+        except (BadRequest, TelegramError):
             pass
         return
 
 
 # =================== MAIN ===================
-
 
 def main():
     init_db()
@@ -1217,7 +1290,7 @@ def main():
     app.add_handler(CallbackQueryHandler(konfirm_callback, pattern="^konfirm_"))
     app.add_handler(CallbackQueryHandler(tolak_callback, pattern="^tolak_"))
 
-    # Admin text handler (link + broadcast) — harus SEBELUM terima_bukti
+    # Admin text handler (link + broadcast) — harus sebelum terima_bukti
     app.add_handler(
         MessageHandler(
             filters.TEXT & filters.User(ADMIN_ID) & ~filters.COMMAND,
@@ -1225,13 +1298,8 @@ def main():
         )
     )
 
-    # Bukti pembayaran dari user (foto) — admin diexclude
-    app.add_handler(
-        MessageHandler(
-            filters.PHOTO & ~filters.COMMAND & ~filters.User(ADMIN_ID),
-            terima_bukti,
-        )
-    )
+    # Bukti pembayaran dari user (foto)
+    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, terima_bukti))
 
     app.run_polling()
 
