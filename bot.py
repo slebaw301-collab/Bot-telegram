@@ -42,7 +42,7 @@ def keep_alive():
 threading.Thread(target=keep_alive, daemon=True).start()
 
 # =================== KONFIGURASI ===================
-TOKEN = "8871249167:AAHFpAPMUq0JFBtaJgapJTjYL7sGF9x-sGg"
+TOKEN = "8871249167:AAG5-RAoIwJmK61EiLZUps1vvaqH0ewk7Hs"
 ADMIN_ID = 7836786174
 QRIS_PHOTO_PATH = "qris.png"
 
