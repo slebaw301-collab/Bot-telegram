@@ -62,8 +62,33 @@ def init_db():
             waktu TEXT
         )
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            user_name TEXT,
+            first_seen TEXT
+        )
+    """)
     conn.commit()
     conn.close()
+
+def simpan_user(user_id, user_name):
+    conn = sqlite3.connect("orders.db")
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR IGNORE INTO users (user_id, user_name, first_seen) VALUES (?, ?, ?)",
+        (user_id, user_name, datetime.now().strftime("%d/%m/%Y %H:%M"))
+    )
+    conn.commit()
+    conn.close()
+
+def get_all_users():
+    conn = sqlite3.connect("orders.db")
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users")
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
 
 def get_order(user_id):
     conn = sqlite3.connect("orders.db")
@@ -83,6 +108,43 @@ def get_all_pending():
     rows = c.fetchall()
     conn.close()
     return rows
+
+def get_riwayat():
+    conn = sqlite3.connect("orders.db")
+    c = conn.cursor()
+    c.execute("SELECT * FROM orders WHERE status='completed' ORDER BY id DESC LIMIT 20")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def get_stats():
+    conn = sqlite3.connect("orders.db")
+    c = conn.cursor()
+
+    today = datetime.now().strftime("%d/%m/%Y")
+    week_start = (datetime.now() - timedelta(days=datetime.now().weekday())).strftime("%d/%m/%Y")
+
+    c.execute("SELECT COUNT(*), SUM(CASE WHEN paket_id='gb_biasa' THEN 5000 WHEN paket_id='gb_vip' THEN 25000 ELSE 0 END) FROM orders WHERE status='completed'")
+    total_order, total_pendapatan = c.fetchone()
+
+    c.execute("SELECT COUNT(*), SUM(CASE WHEN paket_id='gb_biasa' THEN 5000 WHEN paket_id='gb_vip' THEN 25000 ELSE 0 END) FROM orders WHERE status='completed' AND waktu LIKE ?", (f"%{today}%",))
+    hari_order, hari_pendapatan = c.fetchone()
+
+    c.execute("SELECT COUNT(*) FROM orders WHERE status='pending'")
+    pending_count = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM users")
+    total_user = c.fetchone()[0]
+
+    conn.close()
+    return {
+        "total_order": total_order or 0,
+        "total_pendapatan": total_pendapatan or 0,
+        "hari_order": hari_order or 0,
+        "hari_pendapatan": hari_pendapatan or 0,
+        "pending_count": pending_count or 0,
+        "total_user": total_user or 0,
+    }
 
 def update_status(user_id, status):
     conn = sqlite3.connect("orders.db")
@@ -114,20 +176,35 @@ async def hapus_admin_msg(context, user_id):
 
 async def post_init(application: Application):
     await application.bot.set_my_commands(
-        [BotCommand("start", "Buka toko")],
+        [
+            BotCommand("start", "Buka toko"),
+            BotCommand("cek", "Cek status order kamu"),
+        ],
         scope=BotCommandScopeDefault()
     )
     await application.bot.set_my_commands(
         [
             BotCommand("start", "Buka toko"),
             BotCommand("pending", "Lihat order pending"),
+            BotCommand("stats", "Statistik penjualan"),
+            BotCommand("riwayat", "Riwayat transaksi"),
+            BotCommand("broadcast", "Kirim pesan ke semua buyer"),
         ],
         scope=BotCommandScopeChat(chat_id=ADMIN_ID)
+    )
+
+    application.job_queue.run_repeating(
+        cek_pending_lama,
+        interval=timedelta(minutes=30),
+        first=timedelta(minutes=30)
     )
 
 # =================== HANDLERS ===================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    simpan_user(user.id, user.full_name)
+
     text = (
         "🛍️ *HYPER FAMILY BUY*\n\n"
         "Selamat datang! Berikut produk tersedia:\n\n"
@@ -142,7 +219,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🛒  Beli Sekarang", callback_data="buy")],
         [
             InlineKeyboardButton("⭐ Testimoni", url="https://t.me/+7zsdSrwYIG8wOTg1"),
-            InlineKeyboardButton("💬 Admin", url="https://t.me/username_admin")
+            InlineKeyboardButton("💬 Admin", url=f"tg://user?id={ADMIN_ID}")
         ]
     ]
 
@@ -153,9 +230,46 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+async def cek_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    order = get_order(user_id)
+
+    if not order:
+        await update.message.reply_text(
+            "📭 Kamu tidak punya order aktif saat ini.\n"
+            "Ketik /start untuk mulai belanja."
+        )
+        return
+
+    paket = PAKET[order[3]]
+    status_text = {
+        'waiting': '⏳ Menunggu bukti transfer',
+        'pending': '🔍 Sedang diverifikasi admin',
+    }.get(order[5], order[5])
+
+    await update.message.reply_text(
+        f"📦 *Status Order Kamu*\n\n"
+        f"• Paket: {paket['emoji']} {paket['nama']}\n"
+        f"• Total: {format_harga(paket['harga'])}\n"
+        f"• Status: {status_text}\n"
+        f"• Waktu: {order[6]}\n\n"
+        f"_Estimasi selesai 1–5 menit setelah bukti dikirim._",
+        parse_mode='Markdown'
+    )
+
 async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
+    user_id = query.from_user.id
+    order = get_order(user_id)
+
+    if order and order[5] == 'pending':
+        await query.answer(
+            "⚠️ Kamu masih punya order yang sedang diverifikasi. Tunggu konfirmasi admin dulu.",
+            show_alert=True
+        )
+        return
 
     text = (
         "📦 *Pilih Paket*\n\n"
@@ -270,9 +384,41 @@ async def auto_cancel(context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
+async def cek_pending_lama(context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect("orders.db")
+    c = conn.cursor()
+    c.execute("SELECT * FROM orders WHERE status='pending' ORDER BY id ASC")
+    orders = c.fetchall()
+    conn.close()
+
+    if orders:
+        text = f"⚠️ *Reminder: {len(orders)} Order Belum Diproses!*\n\n"
+        for o in orders:
+            paket = PAKET[o[3]]
+            text += f"• {o[2]} — {paket['emoji']} {paket['nama']} — {o[6]}\n"
+        text += "\nSegera proses order di atas!"
+
+        keyboard = [[InlineKeyboardButton("📋 Lihat Order", callback_data="admin_see_orders")]]
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=text,
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except:
+            pass
+
 async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
+
+    order = get_order(user_id)
+    if order and order[5] == 'pending':
+        await update.message.reply_text(
+            "⏳ Order kamu sedang diverifikasi. Mohon tunggu konfirmasi dari admin."
+        )
+        return
 
     paket_id = context.user_data.get('paket_id')
 
@@ -340,6 +486,57 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     simpan_admin_msg(context, user_id, notif_msg.message_id)
 
 # =================== ADMIN ===================
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+
+    s = get_stats()
+    text = (
+        "📊 *Statistik Penjualan*\n\n"
+        f"👥 Total Buyer: *{s['total_user']} orang*\n\n"
+        f"📅 *Hari Ini:*\n"
+        f"• Order: {s['hari_order']} transaksi\n"
+        f"• Pendapatan: *{format_harga(s['hari_pendapatan'])}*\n\n"
+        f"📈 *Total Keseluruhan:*\n"
+        f"• Order selesai: {s['total_order']} transaksi\n"
+        f"• Total pendapatan: *{format_harga(s['total_pendapatan'])}*\n\n"
+        f"⏳ Order pending: *{s['pending_count']}*"
+    )
+
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+async def admin_riwayat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+
+    orders = get_riwayat()
+
+    if not orders:
+        await update.message.reply_text("📭 Belum ada transaksi selesai.")
+        return
+
+    text = f"📜 *Riwayat Transaksi (20 Terakhir)*\n\n"
+    for o in orders:
+        paket = PAKET[o[3]]
+        text += f"{paket['emoji']} *{o[2]}* — {paket['nama']} — {format_harga(paket['harga'])} — {o[6]}\n"
+
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+async def admin_broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+
+    users = get_all_users()
+    context.bot_data['waiting_broadcast'] = True
+
+    await update.message.reply_text(
+        f"📢 *Mode Broadcast*\n\n"
+        f"Total penerima: *{len(users)} orang*\n\n"
+        f"Ketik pesan yang ingin dikirim ke semua buyer.\n"
+        f"_(Kirim /batal untuk membatalkan)_",
+        parse_mode='Markdown'
+    )
 
 async def admin_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
@@ -523,12 +720,22 @@ async def admin_konfirmasi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await hapus_admin_msg(context, user_id)
 
 async def admin_kirim_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.bot_data.get('waiting_broadcast'):
+        await kirim_broadcast(update, context)
+        return
+
     user_id = context.bot_data.get('waiting_link_for')
 
     if not user_id:
         return
 
     link = update.message.text
+
+    if link == '/batal':
+        context.bot_data.pop('waiting_link_for', None)
+        await update.message.reply_text("❌ Dibatalkan.")
+        return
+
     order = get_order(user_id)
 
     if not order:
@@ -561,6 +768,40 @@ async def admin_kirim_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
+async def kirim_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pesan = update.message.text
+
+    if pesan == '/batal':
+        context.bot_data.pop('waiting_broadcast', None)
+        await update.message.reply_text("❌ Broadcast dibatalkan.")
+        return
+
+    context.bot_data.pop('waiting_broadcast', None)
+    users = get_all_users()
+
+    berhasil = 0
+    gagal = 0
+
+    await update.message.reply_text(f"📤 Mengirim pesan ke {len(users)} buyer...")
+
+    for uid in users:
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=f"📢 *Pesan dari Admin*\n\n{pesan}",
+                parse_mode='Markdown'
+            )
+            berhasil += 1
+        except:
+            gagal += 1
+
+    await update.message.reply_text(
+        f"✅ *Broadcast Selesai*\n\n"
+        f"• Terkirim: {berhasil} orang\n"
+        f"• Gagal: {gagal} orang",
+        parse_mode='Markdown'
+    )
+
 async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -587,7 +828,7 @@ async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🛒  Beli Sekarang", callback_data="buy")],
         [
             InlineKeyboardButton("⭐ Testimoni", url="https://t.me/+7zsdSrwYIG8wOTg1"),
-            InlineKeyboardButton("💬 Admin", url="https://t.me/username_admin")
+            InlineKeyboardButton("💬 Admin", url=f"tg://user?id={ADMIN_ID}")
         ]
     ]
 
@@ -617,7 +858,11 @@ def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cek", cek_order))
     app.add_handler(CommandHandler("pending", admin_pending))
+    app.add_handler(CommandHandler("stats", admin_stats))
+    app.add_handler(CommandHandler("riwayat", admin_riwayat))
+    app.add_handler(CommandHandler("broadcast", admin_broadcast_cmd))
     app.add_handler(CallbackQueryHandler(buy_callback, pattern="^buy$"))
     app.add_handler(CallbackQueryHandler(back_start, pattern="^back_start$"))
     app.add_handler(CallbackQueryHandler(back_orders, pattern="^back_orders$"))
