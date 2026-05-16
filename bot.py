@@ -199,19 +199,61 @@ def format_harga(harga):
     return f"Rp {harga:,}".replace(",", ".")
 
 
+# =================== HELPER: SIMPAN & HAPUS PESAN ===================
+
+
+def simpan_msg_user(context, user_id, message_id):
+    """Simpan message_id pesan /start user untuk dihapus nanti."""
+    context.bot_data.setdefault("user_start_messages", {})
+    context.bot_data["user_start_messages"].setdefault(user_id, [])
+    context.bot_data["user_start_messages"][user_id].append(message_id)
+
+
+async def hapus_msg_user_lama(context, chat_id):
+    """Hapus semua pesan /start user sebelumnya."""
+    msgs = context.bot_data.get("user_start_messages", {}).pop(chat_id, [])
+    for msg_id in msgs:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            pass
+
+
 def simpan_admin_msg(context, user_id, message_id):
+    """Simpan message_id notif admin yang terkait order user tertentu."""
     context.bot_data.setdefault("admin_messages", {})
     context.bot_data["admin_messages"].setdefault(user_id, [])
     context.bot_data["admin_messages"][user_id].append(message_id)
 
 
 async def hapus_admin_msg(context, user_id):
+    """Hapus semua pesan admin yang terkait order user tertentu."""
     msg_ids = context.bot_data.get("admin_messages", {}).pop(user_id, [])
     for msg_id in msg_ids:
         try:
             await context.bot.delete_message(chat_id=ADMIN_ID, message_id=msg_id)
-        except:
+        except Exception:
             pass
+
+
+def simpan_order_msg_admin(context, user_id, message_id):
+    """Simpan message_id chat admin yang terkait proses order (foto bukti, konfirmasi, dll)."""
+    context.bot_data.setdefault("order_process_messages", {})
+    context.bot_data["order_process_messages"].setdefault(user_id, [])
+    context.bot_data["order_process_messages"][user_id].append(message_id)
+
+
+async def hapus_order_msg_admin(context, user_id):
+    """Hapus semua chat admin terkait proses order setelah link dikirim."""
+    msg_ids = context.bot_data.get("order_process_messages", {}).pop(user_id, [])
+    for msg_id in msg_ids:
+        try:
+            await context.bot.delete_message(chat_id=ADMIN_ID, message_id=msg_id)
+        except Exception:
+            pass
+
+
+# =================== TEKS & KEYBOARD ===================
 
 
 def teks_menu_utama():
@@ -274,27 +316,57 @@ async def post_init(application: Application):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    chat_id = update.effective_chat.id
     simpan_user(user.id, user.full_name)
+
+    # Reset state
     context.bot_data.pop("waiting_broadcast", None)
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
+    context.user_data.pop("paket_id", None)
+
+    # Hapus pesan /start lama milik user ini
+    await hapus_msg_user_lama(context, chat_id)
+
+    # Hapus pesan command /start itu sendiri
+    if update.message:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+    # Kirim menu baru & simpan message_id-nya
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
         text=teks_menu_utama(),
         parse_mode="Markdown",
         reply_markup=keyboard_menu_utama(),
     )
+    simpan_msg_user(context, chat_id, msg.message_id)
 
 
 async def cek_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     order = get_last_order(user_id)
+
+    # Hapus pesan command /cek
+    if update.message:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
     if not order:
-        await update.message.reply_text(
-            "📭 *Belum Ada Pesanan*\n\n"
-            "Kamu belum pernah melakukan pemesanan.\n"
-            "Ketik /start untuk mulai berbelanja.",
+        msg = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=(
+                "📭 *Belum Ada Pesanan*\n\n"
+                "Kamu belum pernah melakukan pemesanan.\n"
+                "Ketik /start untuk mulai berbelanja."
+            ),
             parse_mode="Markdown",
         )
+        simpan_msg_user(context, update.effective_chat.id, msg.message_id)
         return
+
     paket = PAKET.get(order[3], {"nama": "Tidak diketahui", "emoji": "❓", "harga": 0})
     status_map = {
         "waiting": ("⏳", "Menunggu bukti pembayaran"),
@@ -304,24 +376,28 @@ async def cek_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "expired": ("⌛", "Sesi pembayaran berakhir"),
     }
     emoji_s, label_s = status_map.get(order[5], ("❓", order[5]))
-    await update.message.reply_text(
-        f"📦 *Status Pesanan Terakhir*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"• Paket   : {paket['emoji']} {paket['nama']}\n"
-        f"• Harga   : {format_harga(paket['harga'])}\n"
-        f"• Status  : {emoji_s} {label_s}\n"
-        f"• Waktu   : {order[6]}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"_Butuh bantuan? Silakan hubungi admin._",
+    msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=(
+            f"📦 *Status Pesanan Terakhir*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"• Paket   : {paket['emoji']} {paket['nama']}\n"
+            f"• Harga   : {format_harga(paket['harga'])}\n"
+            f"• Status  : {emoji_s} {label_s}\n"
+            f"• Waktu   : {order[6]}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"_Butuh bantuan? Silakan hubungi admin._"
+        ),
         parse_mode="Markdown",
     )
+    simpan_msg_user(context, update.effective_chat.id, msg.message_id)
 
 
 async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
         await query.answer()
-    except:
+    except Exception:
         pass
     user_id = query.from_user.id
     order = get_order(user_id)
@@ -331,9 +407,10 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "⚠️ Kamu masih memiliki pesanan yang sedang diverifikasi. Mohon tunggu konfirmasi admin.",
                 show_alert=True,
             )
-        except:
+        except Exception:
             pass
         return
+
     text = (
         "📦 *Pilih Paket*\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -354,7 +431,7 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
         )
-    except:
+    except Exception:
         pass
 
 
@@ -362,7 +439,7 @@ async def pilih_paket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
         await query.answer()
-    except:
+    except Exception:
         pass
     paket_id = query.data.replace("pilih_", "")
     paket = PAKET[paket_id]
@@ -404,24 +481,32 @@ async def pilih_paket(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await query.message.delete()
-    except:
+    except Exception:
         pass
 
     if not os.path.exists(QRIS_PHOTO_PATH):
-        await context.bot.send_message(
+        msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text="⚠️ QRIS tidak tersedia saat ini. Silakan hubungi admin.",
         )
+        simpan_msg_user(context, update.effective_chat.id, msg.message_id)
         return
 
     with open(QRIS_PHOTO_PATH, "rb") as photo:
-        await context.bot.send_photo(
+        msg = await context.bot.send_photo(
             chat_id=update.effective_chat.id,
             photo=photo,
             caption=caption,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+    # Simpan pesan QRIS agar bisa dihapus saat /start lagi
+    simpan_msg_user(context, update.effective_chat.id, msg.message_id)
+
+    # Set auto cancel job
+    # Hapus job lama kalau ada
+    for job in context.job_queue.get_jobs_by_name(str(user_id)):
+        job.schedule_removal()
 
     context.job_queue.run_once(
         auto_cancel,
@@ -453,7 +538,7 @@ async def auto_cancel(context: ContextTypes.DEFAULT_TYPE):
             ),
             parse_mode="Markdown",
         )
-    except:
+    except Exception:
         pass
 
 
@@ -474,7 +559,7 @@ async def cek_pending_lama(context: ContextTypes.DEFAULT_TYPE):
                     [[InlineKeyboardButton("📋 Lihat Pesanan", callback_data="admin_see_orders")]]
                 ),
             )
-        except:
+        except Exception:
             pass
 
 
@@ -482,15 +567,20 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
 
+    # Abaikan foto dari admin supaya tidak bentrok
+    if user_id == ADMIN_ID:
+        return
+
     order = get_order(user_id)
     if order and order[5] == "pending":
-        await update.message.reply_text(
+        msg = await update.message.reply_text(
             "🔍 *Pembayaran Sedang Diverifikasi*\n\n"
             "Bukti pembayaran kamu sudah kami terima dan\n"
             "sedang dalam proses verifikasi oleh admin.\n\n"
             "_Mohon tunggu, proses biasanya memakan waktu 1–5 menit._",
             parse_mode="Markdown",
         )
+        simpan_msg_user(context, update.effective_chat.id, msg.message_id)
         return
 
     paket_id = context.user_data.get("paket_id")
@@ -506,15 +596,19 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if row:
             paket_id = row[0]
         else:
-            await update.message.reply_text(
+            msg = await update.message.reply_text(
                 "⚠️ *Tidak Ada Pesanan Aktif*\n\n"
                 "Kamu belum memilih paket atau sesi telah berakhir.\n"
                 "Ketik /start untuk memulai pemesanan baru.",
                 parse_mode="Markdown",
             )
+            simpan_msg_user(context, update.effective_chat.id, msg.message_id)
             return
 
-    paket = PAKET[paket_id]
+    paket = PAKET.get(paket_id)
+    if not paket:
+        return
+
     file_id = update.message.photo[-1].file_id
 
     conn = sqlite3.connect("orders.db")
@@ -526,10 +620,11 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
+    # Cancel auto-expire job
     for job in context.job_queue.get_jobs_by_name(str(user_id)):
         job.schedule_removal()
 
-    await context.bot.send_message(
+    msg = await context.bot.send_message(
         chat_id=user_id,
         text=(
             f"✅ *Bukti Pembayaran Diterima*\n"
@@ -544,6 +639,7 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ),
         parse_mode="Markdown",
     )
+    simpan_msg_user(context, user_id, msg.message_id)
 
     notif_msg = await context.bot.send_message(
         chat_id=ADMIN_ID,
@@ -561,6 +657,7 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ),
     )
     simpan_admin_msg(context, user_id, notif_msg.message_id)
+    simpan_order_msg_admin(context, user_id, notif_msg.message_id)
 
 
 # =================== ADMIN ===================
@@ -647,7 +744,7 @@ async def admin_see_orders_callback(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     try:
         await query.answer()
-    except:
+    except Exception:
         pass
     if query.from_user.id != ADMIN_ID:
         return
@@ -655,7 +752,7 @@ async def admin_see_orders_callback(update: Update, context: ContextTypes.DEFAUL
     if not orders:
         try:
             await query.edit_message_text("✅ Tidak ada pesanan yang menunggu konfirmasi saat ini.")
-        except:
+        except Exception:
             pass
         return
     text = f"📋 *Pesanan Menunggu Konfirmasi ({len(orders)})*\n━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -670,20 +767,21 @@ async def admin_see_orders_callback(update: Update, context: ContextTypes.DEFAUL
         await query.edit_message_text(
             text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
         )
-    except:
-        await context.bot.send_message(
+    except Exception:
+        msg = await context.bot.send_message(
             chat_id=ADMIN_ID,
             text=text,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+        # Simpan pesan daftar order agar bisa dihapus nanti (tidak terkait user tertentu)
 
 
 async def proses_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
         await query.answer()
-    except:
+    except Exception:
         pass
     if query.from_user.id != ADMIN_ID:
         return
@@ -702,7 +800,7 @@ async def proses_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if not order:
         try:
             await query.edit_message_text("⚠️ Pesanan tidak ditemukan atau sudah diproses.")
-        except:
+        except Exception:
             pass
         return
 
@@ -714,8 +812,14 @@ async def proses_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
         ]
     ]
 
+    # Hapus pesan list sebelumnya
     try:
-        await context.bot.send_photo(
+        await query.message.delete()
+    except Exception:
+        pass
+
+    try:
+        foto_msg = await context.bot.send_photo(
             chat_id=ADMIN_ID,
             photo=order[4],
             caption=(
@@ -730,10 +834,8 @@ async def proses_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
-        try:
-            await query.message.delete()
-        except:
-            pass
+        # Simpan pesan foto bukti agar bisa dihapus setelah order selesai
+        simpan_order_msg_admin(context, target_user_id, foto_msg.message_id)
     except Exception as e:
         await context.bot.send_message(
             chat_id=ADMIN_ID, text=f"⚠️ Gagal memuat bukti pembayaran: {e}"
@@ -741,17 +843,10 @@ async def proses_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def konfirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Alur setelah admin tekan Konfirmasi:
-    1. Status order → 'completed'
-    2. Buyer diberi tahu pembayaran dikonfirmasi & link sedang disiapkan
-    3. Bot minta admin kirim link konten
-    4. Admin kirim link → bot teruskan ke buyer
-    """
     query = update.callback_query
     try:
         await query.answer()
-    except:
+    except Exception:
         pass
     if query.from_user.id != ADMIN_ID:
         return
@@ -769,8 +864,10 @@ async def konfirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not order:
         try:
-            await query.edit_message_caption(caption="⚠️ Pesanan tidak ditemukan.", parse_mode="Markdown")
-        except:
+            await query.edit_message_caption(
+                caption="⚠️ Pesanan tidak ditemukan.", parse_mode="Markdown"
+            )
+        except Exception:
             pass
         return
 
@@ -779,7 +876,7 @@ async def konfirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_status(target_user_id, "completed")
     await hapus_admin_msg(context, target_user_id)
 
-    # Update caption foto bukti bayar di chat admin
+    # Update caption foto bukti di chat admin jadi status confirmed
     try:
         await query.edit_message_caption(
             caption=(
@@ -789,12 +886,12 @@ async def konfirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
             parse_mode="Markdown",
         )
-    except:
+    except Exception:
         pass
 
     # Beritahu buyer bahwa pembayaran sudah dikonfirmasi
     try:
-        await context.bot.send_message(
+        konfirm_msg = await context.bot.send_message(
             chat_id=target_user_id,
             text=(
                 "🎉 *Pembayaran Dikonfirmasi!*\n"
@@ -807,7 +904,8 @@ async def konfirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
             parse_mode="Markdown",
         )
-    except:
+        simpan_msg_user(context, target_user_id, konfirm_msg.message_id)
+    except Exception:
         pass
 
     # Simpan data untuk pengiriman link
@@ -815,10 +913,12 @@ async def konfirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "user_id": target_user_id,
         "user_name": order[2],
         "paket": paket,
+        # Simpan message_id foto bukti agar bisa dihapus setelah link terkirim
+        "foto_msg_id": query.message.message_id,
     }
 
-    # Minta admin kirim link
-    await context.bot.send_message(
+    # Minta admin kirim link konten
+    link_req_msg = await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=(
             f"🔗 *Kirim Link Konten*\n"
@@ -830,13 +930,14 @@ async def konfirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ),
         parse_mode="Markdown",
     )
+    simpan_order_msg_admin(context, target_user_id, link_req_msg.message_id)
 
 
 async def tolak_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
         await query.answer()
-    except:
+    except Exception:
         pass
     if query.from_user.id != ADMIN_ID:
         return
@@ -845,9 +946,14 @@ async def tolak_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_status(target_user_id, "rejected")
     await hapus_admin_msg(context, target_user_id)
 
+    # Hapus semua chat admin terkait order ini
+    await hapus_order_msg_admin(context, target_user_id)
+
     try:
-        await query.edit_message_caption(caption="❌ *Pesanan telah ditolak.*", parse_mode="Markdown")
-    except:
+        await query.edit_message_caption(
+            caption="❌ *Pesanan telah ditolak.*", parse_mode="Markdown"
+        )
+    except Exception:
         pass
 
     try:
@@ -868,7 +974,7 @@ async def tolak_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
             parse_mode="Markdown",
         )
-    except:
+    except Exception:
         pass
 
 
@@ -876,9 +982,10 @@ async def back_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     try:
         await query.answer()
-    except:
+    except Exception:
         pass
     user_id = query.from_user.id
+    chat_id = update.effective_chat.id
 
     conn = sqlite3.connect("orders.db")
     c = conn.cursor()
@@ -889,20 +996,26 @@ async def back_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     conn.commit()
     conn.close()
 
+    # Hapus auto cancel job
     for job in context.job_queue.get_jobs_by_name(str(user_id)):
         job.schedule_removal()
 
+    # Hapus pesan QRIS / menu lama
     try:
         await query.message.delete()
-    except:
+    except Exception:
         pass
 
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
+    # Hapus sisa pesan lama
+    await hapus_msg_user_lama(context, chat_id)
+
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
         text=teks_menu_utama(),
         parse_mode="Markdown",
         reply_markup=keyboard_menu_utama(),
     )
+    simpan_msg_user(context, chat_id, msg.message_id)
 
 
 # =================== ADMIN TEXT HANDLER ===================
@@ -912,7 +1025,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Menangani semua pesan teks dari admin.
     Prioritas:
-      1. Jika waiting_link_for aktif → kirim link ke buyer
+      1. Jika waiting_link_for aktif → kirim link ke buyer, hapus chat order admin
       2. Jika waiting_broadcast aktif → broadcast ke semua buyer
     """
     if update.message.from_user.id != ADMIN_ID:
@@ -926,11 +1039,12 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_user_id = link_data["user_id"]
         target_name = link_data["user_name"]
         paket = link_data["paket"]
+        foto_msg_id = link_data.get("foto_msg_id")
 
         context.bot_data.pop("waiting_link_for", None)
 
         try:
-            await context.bot.send_message(
+            link_msg = await context.bot.send_message(
                 chat_id=target_user_id,
                 text=(
                     f"📦 *Pesanan Siap!*\n"
@@ -946,19 +1060,43 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
                 disable_web_page_preview=False,
             )
-            await update.message.reply_text(
+            # Simpan pesan link agar bisa dihapus kalau user /start
+            simpan_msg_user(context, target_user_id, link_msg.message_id)
+
+            # Konfirmasi ke admin
+            konfirm_admin_msg = await update.message.reply_text(
                 f"✅ *Link Berhasil Dikirim!*\n\n"
                 f"👤 Penerima : {target_name}\n"
                 f"📦 Paket    : {paket['emoji']} {paket['nama']}\n"
                 f"🔗 Link     : {text_input}",
                 parse_mode="Markdown",
             )
+            simpan_order_msg_admin(context, target_user_id, konfirm_admin_msg.message_id)
+
         except Exception as e:
             await update.message.reply_text(
                 f"⚠️ Gagal mengirim link ke buyer.\nError: {e}\n\n"
                 f"Coba kirim manual ke user ID: `{target_user_id}`",
                 parse_mode="Markdown",
             )
+            return
+
+        # Hapus semua chat admin terkait order ini (foto bukti, request link, konfirmasi)
+        # Termasuk foto bukti yang message_id-nya disimpan di link_data
+        if foto_msg_id:
+            try:
+                await context.bot.delete_message(chat_id=ADMIN_ID, message_id=foto_msg_id)
+            except Exception:
+                pass
+
+        await hapus_order_msg_admin(context, target_user_id)
+
+        # Juga hapus pesan teks link yang baru dikirim admin itu sendiri
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
         return
 
     # ── PRIORITAS 2: Broadcast ──
@@ -1002,7 +1140,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• Gagal    : {gagal} buyer",
                 parse_mode="Markdown",
             )
-        except:
+        except Exception:
             pass
         return
 
@@ -1035,7 +1173,7 @@ def main():
     app.add_handler(CallbackQueryHandler(konfirm_callback, pattern="^konfirm_"))
     app.add_handler(CallbackQueryHandler(tolak_callback, pattern="^tolak_"))
 
-    # Admin text handler (link + broadcast) — harus sebelum terima_bukti
+    # Admin text handler (link + broadcast) — harus SEBELUM terima_bukti
     app.add_handler(
         MessageHandler(
             filters.TEXT & filters.User(ADMIN_ID) & ~filters.COMMAND,
@@ -1043,8 +1181,13 @@ def main():
         )
     )
 
-    # Bukti pembayaran dari user (foto)
-    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, terima_bukti))
+    # Bukti pembayaran dari user (foto) — admin diexclude
+    app.add_handler(
+        MessageHandler(
+            filters.PHOTO & ~filters.COMMAND & ~filters.User(ADMIN_ID),
+            terima_bukti,
+        )
+    )
 
     app.run_polling()
 
