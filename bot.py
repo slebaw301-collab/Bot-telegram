@@ -323,8 +323,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.bot_data.pop("waiting_broadcast", None)
     context.user_data.pop("paket_id", None)
 
-    # Hapus pesan bot sebelumnya (menu lama, dll)
+    # Hapus pesan /start lama milik user ini
     await hapus_msg_user_lama(context, chat_id)
+
+    # Hapus pesan command /start itu sendiri
+    if update.message:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
 
     # Kirim menu baru & simpan message_id-nya
     msg = await context.bot.send_message(
@@ -339,6 +346,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cek_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     order = get_last_order(user_id)
+
+    # Hapus pesan command /cek
+    if update.message:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
 
     if not order:
         msg = await context.bot.send_message(
