@@ -199,6 +199,13 @@ def format_harga(harga):
     return f"Rp {harga:,}".replace(",", ".")
 
 
+def keyboard_hubungi_admin():
+    """Keyboard tombol hubungi admin untuk pesan error."""
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("💬 Hubungi Admin", url=f"tg://user?id={ADMIN_ID}")]]
+    )
+
+
 # =================== HELPER: SIMPAN & HAPUS PESAN ===================
 
 
@@ -323,15 +330,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.bot_data.pop("waiting_broadcast", None)
     context.user_data.pop("paket_id", None)
 
-    # Hapus pesan /start lama milik user ini
-    await hapus_msg_user_lama(context, chat_id)
+    # Cek apakah user masih punya order pending
+    order = get_order(user.id)
+    if order and order[5] == "pending":
+        await hapus_msg_user_lama(context, chat_id)
+        paket = PAKET.get(order[3], {"emoji": "📦", "nama": "Unknown"})
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "🔍 *Pesanan Sedang Diverifikasi*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Kamu masih memiliki pesanan aktif:\n"
+                f"• Paket  : {paket['emoji']} {paket['nama']}\n"
+                f"• Status : 🔍 Sedang diverifikasi admin\n\n"
+                "Mohon tunggu konfirmasi dari admin.\n"
+                "Estimasi: *1–5 menit*.\n\n"
+                "_Jika ada masalah, silakan hubungi admin._"
+            ),
+            parse_mode="Markdown",
+            reply_markup=keyboard_hubungi_admin(),
+        )
+        simpan_msg_user(context, chat_id, msg.message_id)
+        return
 
-    # Hapus pesan command /start itu sendiri
-    if update.message:
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
+    # Hapus pesan bot sebelumnya (menu lama, dll)
+    await hapus_msg_user_lama(context, chat_id)
 
     # Kirim menu baru & simpan message_id-nya
     msg = await context.bot.send_message(
@@ -346,13 +369,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cek_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     order = get_last_order(user_id)
-
-    # Hapus pesan command /cek
-    if update.message:
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
 
     if not order:
         msg = await context.bot.send_message(
@@ -402,10 +418,19 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     order = get_order(user_id)
     if order and order[5] == "pending":
+        paket = PAKET.get(order[3], {"emoji": "📦", "nama": "Unknown"})
         try:
-            await query.answer(
-                "⚠️ Kamu masih memiliki pesanan yang sedang diverifikasi. Mohon tunggu konfirmasi admin.",
-                show_alert=True,
+            await query.edit_message_text(
+                "🔍 *Pesanan Sedang Diverifikasi*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Kamu masih memiliki pesanan aktif:\n"
+                f"• Paket  : {paket['emoji']} {paket['nama']}\n"
+                f"• Status : 🔍 Sedang diverifikasi admin\n\n"
+                "Mohon tunggu konfirmasi dari admin.\n"
+                "Estimasi: *1–5 menit*.\n\n"
+                "_Jika ada masalah, silakan hubungi admin._",
+                parse_mode="Markdown",
+                reply_markup=keyboard_hubungi_admin(),
             )
         except Exception:
             pass
@@ -487,7 +512,13 @@ async def pilih_paket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not os.path.exists(QRIS_PHOTO_PATH):
         msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="⚠️ QRIS tidak tersedia saat ini. Silakan hubungi admin.",
+            text=(
+                "⚠️ *QRIS Tidak Tersedia*\n\n"
+                "QRIS sedang tidak tersedia saat ini.\n"
+                "Silakan hubungi admin untuk melanjutkan pembayaran."
+            ),
+            parse_mode="Markdown",
+            reply_markup=keyboard_hubungi_admin(),
         )
         simpan_msg_user(context, update.effective_chat.id, msg.message_id)
         return
@@ -534,9 +565,11 @@ async def auto_cancel(context: ContextTypes.DEFAULT_TYPE):
                 "⌛ *Sesi Pembayaran Berakhir*\n\n"
                 "Pesanan kamu dibatalkan secara otomatis karena\n"
                 "melebihi batas waktu 30 menit.\n\n"
-                "Ketik /start untuk membuat pesanan baru."
+                "Ketik /start untuk membuat pesanan baru.\n"
+                "Jika ada kendala, silakan hubungi admin."
             ),
             parse_mode="Markdown",
+            reply_markup=keyboard_hubungi_admin(),
         )
     except Exception:
         pass
@@ -573,14 +606,19 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     order = get_order(user_id)
     if order and order[5] == "pending":
-        msg = await update.message.reply_text(
-            "🔍 *Pembayaran Sedang Diverifikasi*\n\n"
-            "Bukti pembayaran kamu sudah kami terima dan\n"
-            "sedang dalam proses verifikasi oleh admin.\n\n"
-            "_Mohon tunggu, proses biasanya memakan waktu 1–5 menit._",
+        msg = await context.bot.send_message(
+            chat_id=user_id,
+            text=(
+                "🔍 *Pembayaran Sedang Diverifikasi*\n\n"
+                "Bukti pembayaran kamu sudah kami terima dan\n"
+                "sedang dalam proses verifikasi oleh admin.\n\n"
+                "_Mohon tunggu, proses biasanya memakan waktu 1–5 menit._\n\n"
+                "Jika ada kendala, silakan hubungi admin."
+            ),
             parse_mode="Markdown",
+            reply_markup=keyboard_hubungi_admin(),
         )
-        simpan_msg_user(context, update.effective_chat.id, msg.message_id)
+        simpan_msg_user(context, user_id, msg.message_id)
         return
 
     paket_id = context.user_data.get("paket_id")
@@ -596,13 +634,18 @@ async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if row:
             paket_id = row[0]
         else:
-            msg = await update.message.reply_text(
-                "⚠️ *Tidak Ada Pesanan Aktif*\n\n"
-                "Kamu belum memilih paket atau sesi telah berakhir.\n"
-                "Ketik /start untuk memulai pemesanan baru.",
+            msg = await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "⚠️ *Tidak Ada Pesanan Aktif*\n\n"
+                    "Kamu belum memilih paket atau sesi telah berakhir.\n"
+                    "Ketik /start untuk memulai pemesanan baru.\n\n"
+                    "Jika kamu merasa ini kesalahan, silakan hubungi admin."
+                ),
                 parse_mode="Markdown",
+                reply_markup=keyboard_hubungi_admin(),
             )
-            simpan_msg_user(context, update.effective_chat.id, msg.message_id)
+            simpan_msg_user(context, user_id, msg.message_id)
             return
 
     paket = PAKET.get(paket_id)
@@ -973,6 +1016,7 @@ async def tolak_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "dengan ketik /start."
             ),
             parse_mode="Markdown",
+            reply_markup=keyboard_hubungi_admin(),
         )
     except Exception:
         pass
